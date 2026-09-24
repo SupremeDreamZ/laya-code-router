@@ -1,0 +1,44 @@
+{
+  "name": "laya-code-router",
+  "version": "0.1.0",
+  "description": "Runs coding CLIs and routes each turn with local Laya (convaiinnovations/laya) \u2014 $0, no key",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SupremeDreamZ/laya-code-router.git"
+  },
+  "homepage": "https://github.com/SupremeDreamZ/laya-code-router#readme",
+  "bugs": "https://github.com/SupremeDreamZ/laya-code-router/issues",
+  "bin": {
+    "laya-claude": "bin/laya-claude.mjs",
+    "laya-codex": "bin/laya-codex.mjs",
+    "laya-explain": "bin/laya-explain.mjs"
+  },
+  "scripts": {
+    "test": "node --test \"test/**/*.test.mjs\"",
+    "live-routing": "node test/live-routing.mjs"
+  },
+  "files": [
+    ".claude/skills",
+    "bin",
+    "skills",
+    "src",
+    "README.md"
+  ],
+  "keywords": [
+    "claude",
+    "claude-code",
+    "codex",
+    "model-routing",
+    "laya",
+    "local"
+  ],
+  "engines": {
+    "node": ">=20.12"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
+  "license": "MIT"
+}
