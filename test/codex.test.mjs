@@ -102,11 +102,11 @@ test("routes subscription auth to ChatGPT and API keys to the public API", () =>
 test("maps tiers and clamps unsupported reasoning effort", () => {
   const body = { model: "laya-router", reasoning: { effort: "max" } };
   const models = new Map([[
-    "gpt-5.6-luna",
+    "gpt-6-luna",
     { default_reasoning_level: "medium", supported_reasoning_levels: [{ effort: "medium" }] },
   ]]);
   applyCodexTier(body, "haiku", models);
-  assert.equal(body.model, "gpt-5.6-luna");
+  assert.equal(body.model, "gpt-6-luna");
   assert.equal(body.reasoning.effort, "medium");
 });
 
@@ -149,7 +149,7 @@ test("surfaces routing as a native commentary event", () => {
   assert.match(events, /response\.output_text\.delta/);
   assert.match(events, /response\.output_item\.done/);
   assert.match(events, /"phase":"commentary"/);
-  assert.match(events, /\[Laya\] routed this turn to gpt-5\.6-sol/);
+  assert.match(events, /\[Laya\] routed this turn to gpt-6\.1-sol/);
   assert.match(events, /confidence 0\.91/);
 
   const unavailable = layaDecisionEvents({

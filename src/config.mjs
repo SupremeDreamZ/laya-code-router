@@ -9,12 +9,22 @@
  */
 export const TIERS = [
   { name: "haiku", id: "claude-haiku-4-5-20251001", family: "haiku", thinking: false, effort: false },
-  { name: "sonnet", id: "claude-sonnet-5", family: "sonnet", thinking: true, effort: true },
-  { name: "opus", id: "claude-opus-5", family: "opus", thinking: true, effort: true },
+  { name: "sonnet", id: "claude-sonnet-5-5", family: "sonnet", thinking: true, effort: true },
+  { name: "opus", id: "claude-opus-5-5", family: "opus", thinking: true, effort: true },
   { name: "fable", id: "claude-fable-5-1", family: "fable", thinking: true, effort: true },
 ];
 
+/**
+ * Claude families the binary ships that are NOT a tier substring: `mythos` is the same
+ * underlying model as Fable 5.1 (the label exists only because Mythos ships without the
+ * dual-use safety measures, to approved orgs), so it belongs at the top tier. Without it
+ * tierOf() returns null and the model is dropped from routing entirely.
+ */
+const ALIASED_FAMILIES = [["mythos", "fable"]];
+
 export const TIER_NAMES = TIERS.map((t) => t.name);
+
+const FAMILIES = [...TIERS.map((t) => [t.family, t.name]), ...ALIASED_FAMILIES];
 
 export const rankOf = (name) => TIER_NAMES.indexOf(name);
 
@@ -35,7 +45,9 @@ export const isAuto = (model) => model === AUTO_MODEL;
 
 /** Tier name for a model string Claude Code sent, or null if we don't recognise it. */
 export const tierOf = (model) =>
-  TIERS.find((t) => typeof model === "string" && model.includes(t.family))?.name ?? null;
+  typeof model === "string"
+    ? (FAMILIES.find(([family]) => model.includes(family)) ?? [null, null])[1]
+    : null;
 
 /**
  * Routing is local and costs nothing, so it is ON by default: there is no API key to check
@@ -47,11 +59,17 @@ export const routingEnabled = () =>
   process.env.LAYA_DISABLE_ROUTING !== "1" && process.env.LAYA_NO_ROUTING !== "1";
 
 /**
- * Fable bills extra usage credits, so it is opt-in. Everything else is covered by a normal
- * subscription.
+ * Fable can bill differently from the other models depending on the plan, so it is opt-in.
+ * Everything else is covered by a normal subscription.
+ *
+ * Who decides: when the menu-bar app is running its switches are the user's explicit choice and
+ * are the only thing consulted. Without it (plain command-line use) the environment variable
+ * decides, as it always has.
  */
-export const availableTiers = () =>
-  TIER_NAMES.filter((n) => n !== "fable" || process.env.LAYA_ALLOW_FABLE === "1");
+export const availableTiers = (appTiers) =>
+  TIER_NAMES.filter(
+    (n) => n !== "fable" || (appTiers ? appTiers.fable === true : process.env.LAYA_ALLOW_FABLE === "1"),
+  );
 
 export const THRESHOLDS = {
   /**
@@ -72,14 +90,40 @@ export const THRESHOLDS = {
    */
   downgradeMaxContextTokens: 20000,
   /**
-   * LAYA sidecar thresholds. The sidecar answers in ~35-50ms warm on MPS but pays a ~40s
-   * model load on its first request in a fresh process, so the first ask of a session runs
-   * under the deadline while the load finishes. `ackMs` is the fast-fail window for a
-   * missing id echo (the sidecar crashed on the request line); the deadline covers the
-   * whole decision including a cold model load.
+   * LAYA sidecar thresholds. The sidecar loads its model as soon as it starts (6 to 10 s measured on
+   * an M2 Max with the weights already on disk; a slower machine takes longer), so a prompt rarely
+   * waits for a load, and one that does waits behind it.
+   *
+   * `ackMs` is the fast-fail window for a missing id echo: the sidecar answers that at once, from a
+   * thread that is never loading, so five seconds without it means a dead process.
+   *
+   * `layaDeadlineMs` is the longest a prompt waits for a decision from a model that is up. Measured
+   * on 2026-10-01 with every core busy, one decision took 31.7 s on the real daemon and another
+   * 95.6 s, and nothing stopped either: this constant was defined and never read. Past it the turn
+   * goes on with the model it already has, which is what "routing must never block a prompt" has to
+   * mean.
+   *
+   * `loadDeadlineMs` is the same wait while the model has not answered anything yet, so it is still
+   * loading. It is longer because a load is not a stall: the first decision of a command-line run
+   * (`laya-claude -p`) is made the moment the process starts, and on a slow machine it waits for the
+   * whole load. The 60 s is the figure this was designed around before the load moved to start-up.
    */
   ackMs: 5000,
-  layaDeadlineMs: 60000,
+  layaDeadlineMs: 15000,
+  loadDeadlineMs: 60000,
+  /**
+   * When a silent model is replaced. The bridge does one request at a time, so a model that is stuck on
+   * one holds every later prompt behind it, and without a replacement the deadline only moves the damage:
+   * each prompt for the rest of the daemon's life waits the full deadline and then goes without a decision.
+   *
+   * It is replaced when it has sent nothing for this many deadlines (or echo windows) while a request
+   * sat with it. Anything it sends counts, an answer to a request already given up on included, so a
+   * model that is slow but working is never mistaken for one that is stuck. The clock starts at the
+   * oldest request it is holding, so prompts that pile up behind a stuck one do not restart it.
+   */
+  wedgedAfterDeadlines: 3,
+  /** A model that is still not loaded this long after it started is replaced at the next missed deadline. */
+  loadGiveUpMs: 5 * 60_000,
 };
 
 export const CONTEXT_WINDOW_TOKENS = 200000;
@@ -126,23 +170,46 @@ export const SCORE_QUESTIONS = {
  * near-flat distribution), so the N-way pick is never part of the routing path — the
  * score rubric is the primary signal and this table carries the decision.
  *
- * Calibrated live 2026-09-23 (default checkpoint, mean of the three rubric scores):
- * trivial/ordinary prompts land in an indistinguishable 0.44-0.51 band — differences
- * there are noise — while genuinely hard work separates upward (0.62+; auth redesign,
- * whole-repo migration). `laya-typed-decisions` was measured worse (classes fully
- * overlap, 0.54-0.67) and is not the default. The honest policy:
+ * Calibrated 2026-09-30 on dirien/jev-router's 58 labeled prompts (13 mechanical, 14 routine,
+ * 31 complex/deep), scored under the conditions production has on a claude.ai login: the
+ * proxy's own model list, opus as the current model, ~5,600 tokens of Claude Code context
+ * (scores move by up to 0.12 with those inputs, so a fit under other conditions is wrong).
+ * The scores rank well (AUC 0.91 frontier vs the rest, 0.86 mechanical vs the rest) but sit
+ * in a narrow 0.35-0.67 band, so the earlier 0.18/0.62 floors were unreachable: 29% tier
+ * accuracy, 48% of prompts under-routed, and the fast tier could not fire at all. Fitted with
+ * under-routing costing twice over-routing and checked leave-one-out: 67% accuracy, 7%
+ * under-routed, 26% over-routed (always "balanced" is 24% and 53% under-routed). Across the 58
+ * leave-one-out fits the cuts moved by 0.02 (lower) and 0.00 (upper). 58 prompts is small and
+ * the labels are one project's opinion: treat these as a starting point and re-fit on prompts
+ * from real sessions.
  *
  *   score >= strongFloor     -> strong tier (hard reasoning / high blast radius)
- *   score <  weakFloor       -> fast tier (below-rubric noise band; near-dormant with
- *                               the current checkpoint, kept for a calibrated one)
+ *   score <  weakFloor       -> fast tier (mechanical, already-specified work)
  *   anything between         -> balanced tier (ordinary day-to-day engineering)
- *
- * The saving comes from the no-router baseline, which pins the session tier at opus:
- * ordinary work drops to the balanced tier instead of riding Opus all session.
  */
 export const SCORE_TIER = {
-  strongFloor: 0.62,
-  weakFloor: 0.18,
+  strongFloor: 0.515,
+  /**
+   * The conservative Haiku floor, used when LAYA gave no judgment answer: the blended score
+   * alone catches only 18% of Haiku-shaped work at this cut, but sends none of the rest down.
+   */
+  weakFloor: 0.396,
+  /**
+   * The Haiku cut once the judgment question is available: Haiku is a cheap first attempt whose
+   * output a person reviews, and the ratchet lets a harder later message move the session up.
+   * Measured on 116 labeled prompts (dirien's 58, 18 written from Anthropic's model guidance,
+   * 40 fresh ones never used to fit anything): 59% of Haiku-shaped work reaches Haiku, 30% of
+   * Sonnet-shaped work is tried on Haiku first, and 0 of 37 Opus-shaped prompts are.
+   */
+  haikuCut: 0.48,
+  /**
+   * `judgment` is LAYA's answer to "would doing this correctly require investigating an
+   * unknown cause, weighing design options, or changing several files?" (0..1). At or above
+   * this the work is never sent to Haiku, which is what keeps unknown-cause debugging and
+   * design work that scores low on the blend (e.g. 0.448 for a scheduler race condition, with
+   * judgment 0.85) off the cheap tier.
+   */
+  judgmentVeto: 0.45,
 };
 
 /** Phrases that mean "the human already decided", checked against the raw prompt. */
@@ -187,3 +254,43 @@ export const questionForModels = (models) => ({
 /** Whether policy accepted the exact model, including a version change within one tier. */
 export const shouldUseExactModel = (reason, chosenTier, finalTier) =>
   (reason === "laya" || reason === "laya/no-change") && chosenTier === finalTier;
+
+/**
+ * Effort the router picks per turn. Anthropic (platform.claude.com/docs/en/build-with-claude/effort):
+ * lower effort is faster and cheaper for straightforward work; for agentic coding on Sonnet 5.5,
+ * "start with medium for well-specified tasks and move to high for harder or longer ones"; Opus
+ * 5.5's own default is medium. Haiku takes no effort parameter.
+ *
+ * Both signals come from LAYA: `judgment` (would this need investigating, design, or several
+ * files) and the blended mean. Measured on the 116 labeled prompts, Sonnet-routed turns split
+ * 13 low / 18 medium / 4 high and Opus-routed turns 21 medium / 25 high. The cuts are a
+ * starting point, not a fit: nothing here has been checked against answer quality.
+ */
+export const EFFORT = {
+  /** Sonnet: a stated task (judgment below this) needs little thinking. */
+  sonnetLowJudgment: 0.25,
+  /** Sonnet: work that needs investigating or design (judgment at or above this) gets high. */
+  sonnetHighJudgment: 0.6,
+  /** Opus: a blended score at or above this is hard work and gets high. */
+  opusHighMean: 0.55,
+  /** Opus: open-ended work (judgment at or above this) gets high whatever the blend says. */
+  opusHighJudgment: 0.65,
+  /**
+   * The launcher's session settings make Claude Code send this level, which is the documented
+   * default for the Claude 5.5 models. It is the marker for "the user did not choose", so the
+   * router replaces it and leaves any other value, which the user chose, alone.
+   */
+  launcherDefault: "medium",
+};
+
+/**
+ * Wording that marks design-shaped work. LAYA reads a brevity constraint on the ANSWER ("top 3
+ * components, one line each") as an easy TASK: a live run scored a multi-tenant billing design at
+ * mean 0.457 and sent it to Haiku, while the same request without the clause scored 0.598 and went
+ * to Opus. Wrongly choosing Haiku is the costly mistake, so these never reach it. On the 116
+ * labeled prompts it matches 22: 20 Opus-shaped, 2 Sonnet-shaped, 0 Haiku-shaped. The list is
+ * hand-written, so it is a stopgap for a scoring blind spot, not a measurement.
+ */
+export const DESIGN_WORK =
+  /\b(design|architect(?:ure)?|re-?architect|system design|trade-?offs?|migrat(?:e|ion)|from scratch|end[- ]to[- ]end|across (?:all|the|our|services|modules))\b/i;
+

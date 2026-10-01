@@ -1,0 +1,21 @@
+#!/bin/sh
+# Stand-in for `claude`, for tests. Answers `claude auth status` the way the real one does, and
+# prints personal-looking fields on purpose so a test can prove none of them get through.
+#
+#   FAKE_CLAUDE_STATE  file holding one of: signed-in | signed-in-key | signed-out | hang | garbage
+#   FAKE_CLAUDE_LOG    file that gets one line appended per call
+[ -n "$FAKE_CLAUDE_LOG" ] && echo "$*" >> "$FAKE_CLAUDE_LOG"
+state=$(cat "$FAKE_CLAUDE_STATE" 2>/dev/null || echo signed-in)
+case "$state" in
+  signed-in)
+    printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max","email":"someone@example.com","orgId":"org-0000-invented","orgName":"Invented Studio LLC","configDirectory":"/Users/someone/.claude"}'
+    exit 0 ;;
+  signed-in-key)
+    printf '%s\n' '{"loggedIn":true,"authMethod":"api_key","apiProvider":"firstParty","email":"someone@example.com"}'
+    exit 0 ;;
+  signed-out)
+    printf '%s\n' '{"loggedIn":false,"authMethod":"none"}'
+    exit 1 ;;
+  hang) exec sleep 5 ;;
+  *) echo "not json"; exit 0 ;;
+esac

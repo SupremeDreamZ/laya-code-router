@@ -12,9 +12,9 @@ const CHATGPT_BASE_URL = "https://chatgpt.com/backend-api/codex";
 const API_BASE_URL = "https://api.openai.com/v1";
 export const CODEX_AUTO_MODEL = "laya-router";
 const DEFAULT_MODELS = {
-  haiku: "gpt-5.6-luna",
+  haiku: "gpt-6-luna",
   sonnet: "gpt-5.6-terra",
-  opus: "gpt-5.6-sol",
+  opus: "gpt-6.1-sol",
   fable: "gpt-6-astra",
 };
 const MODEL_ENV = {

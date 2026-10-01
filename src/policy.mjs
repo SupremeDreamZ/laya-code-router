@@ -1,4 +1,9 @@
-import { SCORE_TIER, TIER_NAMES, THRESHOLDS, OVERRIDE_PATTERNS, rankOf } from "./config.mjs";
+import { SCORE_TIER, EFFORT, DESIGN_WORK, TIER_NAMES, THRESHOLDS, OVERRIDE_PATTERNS, rankOf } from "./config.mjs";
+
+/** Design-shaped wording (architecture, migration, from scratch); see DESIGN_WORK. */
+export function isDesignWork(prompt) {
+  return DESIGN_WORK.test(prompt ?? "");
+}
 
 /** The tier the user named explicitly in the prompt, or null. */
 export function detectOverride(prompt) {
@@ -39,6 +44,10 @@ export function tierFromScores(metrics = {}) {
   if (!parts.length) return null;
   const mean = parts.reduce((a, b) => a + b, 0) / parts.length;
   if (mean >= SCORE_TIER.strongFloor) return "opus";
+  // Haiku: the looser cut applies only when LAYA also says the work needs no investigation or
+  // design. Without that answer, only the conservative floor is safe.
+  const judgment = Number.isFinite(metrics.judgment) ? metrics.judgment : null;
+  if (judgment !== null && mean < SCORE_TIER.haikuCut && judgment < SCORE_TIER.judgmentVeto) return "haiku";
   if (mean < SCORE_TIER.weakFloor) return "haiku";
   return "sonnet";
 }
@@ -59,7 +68,7 @@ export function tierFromScores(metrics = {}) {
  * @param {number} input.contextTokens approximate size of the conversation so far
  * @returns {{tier: string, reason: string, changed: boolean}}
  */
-export function decide({ prompt, laya, current, available, contextTokens = 0 }) {
+export function decide({ prompt, laya, current, available, contextTokens = 0, fresh = false }) {
   const settle = (tier, reason) => {
     const final = clampToAvailable(tier, available) ?? current;
     const why = final === tier ? reason : `${reason}+unavailable`;
@@ -71,8 +80,10 @@ export function decide({ prompt, laya, current, available, contextTokens = 0 }) 
 
   if (!laya) return settle(current, "laya-unavailable");
 
-  const target = tierFromScores(laya.metrics);
+  let target = tierFromScores(laya.metrics);
   if (!target) return settle(current, "laya-unavailable");
+  // Design-shaped work is never the cheap tier, whatever LAYA scored; it only moves work up.
+  if (target === "haiku" && isDesignWork(prompt)) target = "sonnet";
 
   if (laya.confidence != null && laya.confidence < THRESHOLDS.minConfidence) {
     if (rankOf(target) < rankOf(current)) return settle(current, "low-confidence-no-downgrade");
@@ -80,9 +91,53 @@ export function decide({ prompt, laya, current, available, contextTokens = 0 }) 
     if (rankOf(target) > ceiling) return settle(TIER_NAMES[ceiling], "low-confidence-capped");
   }
 
+  // Ratchet (dirien/jev-router): in an ongoing session the tier only goes up. Anthropic's
+  // prompt cache belongs to one model, so a downgrade makes the next request start cold, and
+  // an agent's requests are mostly cache reads. A new, idle or compacted session has no
+  // ongoing decision to protect, so `fresh` lets it move either way.
+  if (!fresh && rankOf(target) < rankOf(current)) return settle(current, "ratchet-no-downgrade");
+
   if (rankOf(target) < rankOf(current) && contextTokens > THRESHOLDS.downgradeMaxContextTokens) {
     return settle(current, "downgrade-not-worth-cache-rebuild");
   }
 
   return settle(target, "laya");
+}
+
+const EFFORT_ORDER = ["low", "medium", "high"];
+
+/**
+ * The effort level for a turn routed to `tier`, or null when the tier takes none (Haiku).
+ * Without LAYA's judgment answer it stays at the documented default rather than guessing.
+ */
+export function effortFor(tier, metrics) {
+  if (tier === "haiku") return null;
+  const parts = [metrics?.taskComplexity, metrics?.reasoningRequired, metrics?.toolComplexity].filter((v) =>
+    Number.isFinite(v),
+  );
+  const mean = parts.length ? parts.reduce((a, b) => a + b, 0) / parts.length : null;
+  const judgment = Number.isFinite(metrics?.judgment) ? metrics.judgment : null;
+  if (tier === "sonnet") {
+    if (judgment === null) return "medium";
+    if (judgment >= EFFORT.sonnetHighJudgment) return "high";
+    if (judgment < EFFORT.sonnetLowJudgment) return "low";
+    return "medium";
+  }
+  if (tier === "opus") {
+    if ((mean !== null && mean >= EFFORT.opusHighMean) || (judgment !== null && judgment >= EFFORT.opusHighJudgment)) return "high";
+    return "medium";
+  }
+  return "high";
+}
+
+/**
+ * Same ratchet as the tier: inside one tier an ongoing session only moves effort up, because a
+ * changed top-level effort restarts the prompt cache (Anthropic, effort docs, "Hold top-level
+ * effort constant within cached conversations"). A fresh session or a tier change already
+ * starts cold, so it takes the new level either way.
+ */
+export function settleEffort({ target, previous, fresh, tierChanged }) {
+  if (target === null) return null;
+  if (fresh || tierChanged || !EFFORT_ORDER.includes(previous)) return target;
+  return EFFORT_ORDER.indexOf(target) > EFFORT_ORDER.indexOf(previous) ? target : previous;
 }

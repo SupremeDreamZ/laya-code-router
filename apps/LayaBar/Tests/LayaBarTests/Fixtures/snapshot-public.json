@@ -1,0 +1,17 @@
+{
+  "laya": true,
+  "engines": {
+    "claude": {
+      "running": true,
+      "port": 56430,
+      "sessions": 0,
+      "startedAt": 1790815016619
+    },
+    "codex": {
+      "running": false,
+      "port": 0,
+      "sessions": 0,
+      "startedAt": null
+    }
+  }
+}

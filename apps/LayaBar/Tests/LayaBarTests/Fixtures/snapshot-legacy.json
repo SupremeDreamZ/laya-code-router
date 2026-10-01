@@ -1,0 +1,211 @@
+{
+  "prefs": {
+    "enabled": true,
+    "preset": "balanced",
+    "tiers": {
+      "haiku": true,
+      "sonnet": true,
+      "opus": true,
+      "fable": false
+    },
+    "effortAuto": true,
+    "pausedTier": "opus",
+    "baselineTier": "opus",
+    "showPrompts": true,
+    "launch": {
+      "engine": "claude",
+      "terminal": "terminal",
+      "resume": false,
+      "dir": null
+    }
+  },
+  "engines": {
+    "claude": {
+      "running": true,
+      "port": 56430,
+      "sessions": 0,
+      "startedAt": 1790815016619
+    },
+    "codex": {
+      "running": false,
+      "port": 0,
+      "sessions": 0,
+      "startedAt": null
+    }
+  },
+  "sidecar": {
+    "state": "stopped",
+    "since": null,
+    "lastError": null
+  },
+  "tiers": [
+    "haiku",
+    "sonnet",
+    "opus"
+  ],
+  "usage": {
+    "today": {
+      "n": 3,
+      "cost": 0.014199999999999999,
+      "byTier": {
+        "sonnet": {
+          "n": 3,
+          "input": 50,
+          "cacheWrite": 2000,
+          "cacheRead": 30000,
+          "output": 310,
+          "cost": 0.014199999999999999
+        }
+      },
+      "base": {
+        "sonnet": 0.014199999999999999,
+        "opus": 0.02228,
+        "fable": 0.04801999999999999
+      },
+      "legacy": 0,
+      "baseline": 0.02228
+    },
+    "series": [
+      {
+        "date": "2026-09-24",
+        "n": 0,
+        "cost": 0,
+        "baseline": 0
+      },
+      {
+        "date": "2026-09-25",
+        "n": 0,
+        "cost": 0,
+        "baseline": 0
+      },
+      {
+        "date": "2026-09-26",
+        "n": 0,
+        "cost": 0,
+        "baseline": 0
+      },
+      {
+        "date": "2026-09-27",
+        "n": 0,
+        "cost": 0,
+        "baseline": 0
+      },
+      {
+        "date": "2026-09-28",
+        "n": 0,
+        "cost": 0,
+        "baseline": 0
+      },
+      {
+        "date": "2026-09-29",
+        "n": 0,
+        "cost": 0,
+        "baseline": 0
+      },
+      {
+        "date": "2026-09-30",
+        "n": 3,
+        "cost": 0.014199999999999999,
+        "baseline": 0.02228
+      }
+    ],
+    "all": {
+      "n": 3,
+      "cost": 0.014199999999999999,
+      "baseline": 0.02228
+    }
+  },
+  "thresholds": {
+    "strongFloor": 0.515,
+    "weakFloor": 0.396,
+    "haikuCut": 0.48,
+    "judgmentVeto": 0.45,
+    "effort": {
+      "sonnetLowJudgment": 0.25,
+      "sonnetHighJudgment": 0.6,
+      "opusHighMean": 0.55,
+      "opusHighJudgment": 0.65,
+      "launcherDefault": "medium"
+    }
+  },
+  "models": [
+    {
+      "tier": "haiku",
+      "id": "claude-haiku-4-5-20251001",
+      "thinking": false,
+      "effort": false
+    },
+    {
+      "tier": "sonnet",
+      "id": "claude-sonnet-5-5",
+      "thinking": true,
+      "effort": true
+    },
+    {
+      "tier": "opus",
+      "id": "claude-opus-5-5",
+      "thinking": true,
+      "effort": true
+    },
+    {
+      "tier": "fable",
+      "id": "claude-fable-5-1",
+      "thinking": true,
+      "effort": true
+    }
+  ],
+  "events": [
+    {
+      "at": 1790815016715,
+      "kind": "routed",
+      "tier": "sonnet",
+      "model": "claude-sonnet-5-5",
+      "effort": "medium",
+      "reason": "laya",
+      "ms": 42,
+      "confidence": 0.61,
+      "prompt": "Add pagination to the users list",
+      "session": "s1",
+      "usage": {
+        "input": 40,
+        "cacheWrite": 2000,
+        "cacheRead": 30000,
+        "output": 300
+      },
+      "cost": 0.01408
+    },
+    {
+      "at": 1790815016746,
+      "kind": "manual",
+      "tier": "sonnet",
+      "model": "claude-sonnet-5-5",
+      "reason": "you chose this model",
+      "session": "",
+      "usage": {
+        "input": 5,
+        "cacheWrite": 0,
+        "cacheRead": 0,
+        "cacheWrite1h": 0,
+        "output": 5
+      },
+      "cost": 0.00006
+    },
+    {
+      "at": 1790815016891,
+      "kind": "manual",
+      "tier": "sonnet",
+      "model": "claude-sonnet-5-5",
+      "reason": "you chose this model",
+      "session": "",
+      "usage": {
+        "input": 5,
+        "cacheWrite": 0,
+        "cacheRead": 0,
+        "cacheWrite1h": 0,
+        "output": 5
+      },
+      "cost": 0.00006
+    }
+  ],
+  "now": 1790815017020
+}

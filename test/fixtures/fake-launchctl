@@ -1,0 +1,38 @@
+#!/bin/sh
+# Stand-in for `launchctl`, for tests. It keeps the one piece of state that matters to a script that
+# starts a login item: whether the job is loaded, and that launchd takes a moment to finish removing
+# one. Measured on a real, busy Mac: `bootout` returns, the job is still being torn down, and a
+# `bootstrap` in that window fails with "Bootstrap failed: 5: Input/output error".
+#
+# State lives in files under $FAKE_LAUNCHCTL_DIR (a test writes them to set the scene):
+#   loaded                present while the job is loaded
+#   linger_after_bootout  how many more `print` calls still see the job after a `bootout`
+#   bootstrap_fail        how many `bootstrap` calls fail with that error before one succeeds
+# Every call is appended to $FAKE_LAUNCHCTL_LOG.
+d="$FAKE_LAUNCHCTL_DIR"
+echo "launchctl $*" >> "${FAKE_LAUNCHCTL_LOG:-/dev/null}"
+count() { cat "$d/$1" 2>/dev/null || echo 0; }
+case "$1" in
+  print)
+    [ -f "$d/loaded" ] && exit 0
+    n=$(count linger)
+    if [ "$n" -gt 0 ]; then echo $((n - 1)) > "$d/linger"; exit 0; fi
+    echo "Could not find service in domain" >&2
+    exit 113 ;;
+  bootout)
+    if [ -f "$d/loaded" ]; then
+      rm -f "$d/loaded"
+      cp "$d/linger_after_bootout" "$d/linger" 2>/dev/null || true
+      exit 0
+    fi
+    echo "Boot-out failed: 3: No such process" >&2
+    exit 3 ;;
+  bootstrap)
+    # A job that is still half-removed cannot be loaded into, whatever else is going on.
+    if [ "$(count linger)" -gt 0 ]; then echo "Bootstrap failed: 5: Input/output error" >&2; exit 5; fi
+    f=$(count bootstrap_fail)
+    if [ "$f" -gt 0 ]; then echo $((f - 1)) > "$d/bootstrap_fail"; echo "Bootstrap failed: 5: Input/output error" >&2; exit 5; fi
+    touch "$d/loaded"
+    exit 0 ;;
+esac
+exit 0

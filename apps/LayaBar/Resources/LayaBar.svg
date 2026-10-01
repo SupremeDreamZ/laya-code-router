@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  LayaBar's Dock/menu-bar icon. A single warm spark over a dark rounded square: the spark is the
+  model choice, the square is the app. Template rendering (isTemplate) so macOS tints it to match
+  the menu bar in light and dark mode.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#d8d8d8"/>
+    </linearGradient>
+  </defs>
+  <g>
+    <path fill="url(#g)" fill-rule="evenodd" d="
+      M 512 96
+      C 300 96 128 268 128 480
+      C 128 700 306 880 512 928
+      C 718 880 896 700 896 480
+      C 896 268 724 96 512 96
+      Z
+      M 512 168
+      C 336 168 200 310 200 480
+      C 200 654 340 800 512 850
+      C 684 800 824 654 824 480
+      C 824 310 688 168 512 168
+      Z"/>
+    <path fill="url(#g)" d="M 512 236 L 552 424 L 744 424 L 578 536 L 634 724 L 512 600 L 390 724 L 446 536 L 280 424 L 472 424 Z"/>
+  </g>
+</svg>

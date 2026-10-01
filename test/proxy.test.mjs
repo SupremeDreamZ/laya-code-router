@@ -81,6 +81,32 @@ test("recognises older model versions within a tier", () => {
   assert.equal(tierOf(undefined), null);
 });
 
+test("routes Mythos to the Fable tier instead of dropping it", () => {
+  // The binary ships these ids; they are the same underlying model as Fable 5.1.
+  assert.equal(tierOf("claude-mythos-5-1"), "fable");
+  assert.equal(tierOf("claude-mythos-5"), "fable");
+});
+
+// Measured against OpenRouter on 2026-09-30: POST /api/v1/messages with
+// `anthropic/claude-sonnet-5.5:batch` answers 404 ("cannot be used with the chat/completions
+// endpoint"), while `~anthropic/claude-haiku-latest` answers 200 and resolves to Haiku 4.5.
+// The live catalog lists both kinds and every entry is offered to LAYA as an option, so a
+// pick on a `:batch` slug would be forwarded verbatim and fail the turn.
+test("never offers a :batch variant, which the messages endpoint rejects", () => {
+  const models = claudeModels([
+    { id: "anthropic/claude-sonnet-5.5", display_name: "Claude Sonnet 5.5" },
+    { id: "anthropic/claude-sonnet-5.5:batch", display_name: "Claude Sonnet 5.5 (batch)" },
+    { id: "anthropic/claude-opus-5.5:batch", display_name: "Claude Opus 5.5 (batch)" },
+  ]);
+  assert.deepEqual(models.map((m) => m.id), ["anthropic/claude-sonnet-5.5"]);
+});
+
+test("a catalog made only of :batch variants falls back to the static tier ids", () => {
+  const models = claudeModels([{ id: "anthropic/claude-sonnet-5.5:batch" }]);
+  assert.equal(models.some((m) => m.id.endsWith(":batch")), false);
+  assert.equal(models.length > 0, true);
+});
+
 test("keeps available Claude model versions as separate choices", () => {
   assert.deepEqual(
     claudeModels([
@@ -212,7 +238,8 @@ test("a routed request without metadata is recorded under the conversation key",
     route: async () => ({
       choice: "claude-sonnet-5",
       confidence: 0.77,
-      metrics: { taskComplexity: 0.4, reasoningRequired: 0.4, toolComplexity: 0.4, contextSize: 0.1 },
+      // 0.47 is an ordinary score under the calibrated floors (fast < 0.396 <= balanced < 0.515).
+      metrics: { taskComplexity: 0.47, reasoningRequired: 0.47, toolComplexity: 0.47, contextSize: 0.1 },
       ms: 1,
     }),
   });
@@ -296,6 +323,36 @@ test("ignores a request whose last message is from the assistant", () => {
   assert.equal(newTurnPrompt(body), null);
 });
 
+// Measured with the real claude 2.1.285 binary pointed straight at a stub server (no proxy in
+// the path): a print-mode request is [user, system], the system entry being appended AFTER the
+// user's message. Reading only the final entry made every real request look like "not a user
+// turn", so LAYA was never asked and every session stayed on the default tier.
+test("finds the user's prompt when Claude Code appends a system-role entry after it", () => {
+  const body = withTools([
+    { role: "user", content: [{ type: "text", text: "fix the bug" }] },
+    { role: "system", content: [{ type: "text", text: "session instructions" }] },
+  ]);
+  assert.equal(newTurnPrompt(body), "fix the bug");
+});
+
+test("still ignores a tool_result continuation when a system entry trails it", () => {
+  const body = withTools([
+    { role: "user", content: "fix the bug" },
+    { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Bash", input: {} }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "done" }] },
+    { role: "system", content: [{ type: "text", text: "session instructions" }] },
+  ]);
+  assert.equal(newTurnPrompt(body), null);
+});
+
+test("ignores an assistant turn that a system entry trails, and a lone system entry", () => {
+  assert.equal(
+    newTurnPrompt(withTools([{ role: "assistant", content: "thinking" }, { role: "system", content: "x" }])),
+    null,
+  );
+  assert.equal(newTurnPrompt(withTools([{ role: "system", content: "x" }])), null);
+});
+
 test("ignores an empty prompt", () => {
   assert.equal(newTurnPrompt(withTools([{ role: "user", content: "   " }])), null);
 });
@@ -351,7 +408,7 @@ test("routing to opus leaves thinking and effort intact", () => {
     output_config: { effort: "medium" },
   };
   applyTier(body, "opus");
-  assert.equal(body.model, "claude-opus-5");
+  assert.equal(body.model, "claude-opus-5-5");
   assert.deepEqual(body.thinking, { type: "adaptive" });
   assert.deepEqual(body.output_config, { effort: "medium" });
 });

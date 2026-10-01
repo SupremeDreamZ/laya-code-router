@@ -1,4 +1,13 @@
 node_modules/
-
 .env
+.DS_Store
+__pycache__/
+*.pyc
+*.mutate-orig
 
+# Swift build output; install.sh rebuilds it
+apps/LayaBar/.build/
+apps/LayaBar/.swiftpm/
+
+# Never commit a person's own settings, usage history or run token
+.laya-router/

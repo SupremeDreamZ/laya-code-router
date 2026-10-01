@@ -1,0 +1,61 @@
+#!/bin/sh
+# Laya, as a background app: one router, warm, for the whole day.
+#
+# Reads its settings from LAYA_HOME (default ~/.laya-router) and serves a control socket on
+# 127.0.0.1:8790. The menu-bar app and every `laya-claude` session talk to this one process, so
+# the ~85s model load is paid once instead of once per terminal.
+set -e
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+
+# launchd does not inherit an interactive shell's PATH, so node is located explicitly rather
+# than assumed: a login item that works only when a terminal happens to be open is not a thing.
+find_node() {
+  if [ -n "$LAYA_NODE" ] && [ -x "$LAYA_NODE" ]; then echo "$LAYA_NODE"; return; fi
+  for candidate in \
+    "$HOME/.local/bin/node" \
+    /opt/homebrew/bin/node \
+    /usr/local/bin/node \
+    /usr/bin/node \
+    "$(command -v node 2>/dev/null || true)"; do
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then echo "$candidate"; return; fi
+  done
+  # nvm and friends keep node outside PATH until a shell sources them.
+  for candidate in "$HOME"/.nvm/versions/node/*/bin/node "$HOME"/.volta/bin/node "$HOME"/.asdf/shims/node; do
+    if [ -x "$candidate" ]; then echo "$candidate"; return; fi
+  done
+  echo "laya: could not find node. Set LAYA_NODE to its full path." >&2
+  exit 1
+}
+NODE="$(find_node)"
+
+# The interpreter that carries the `laya` package. Setup records it in ~/.laya-router.env, the same
+# file the command-line launcher reads, so a person who installed it anywhere gets the same answer
+# from both. launchd starts this with almost no environment, so nothing is assumed: an explicit
+# variable wins, then the file, then the places setup and the original build put it.
+env_python() {
+  [ -f "$HOME/.laya-router.env" ] || return 0
+  # Last assignment wins; comments and blank lines are ignored; one layer of quotes is removed.
+  value="$(sed -n 's/^[[:space:]]*LAYA_PYTHON=[[:space:]]*//p' "$HOME/.laya-router.env" | tail -n 1)"
+  value="${value%\"}"; value="${value#\"}"; value="${value%\'}"; value="${value#\'}"
+  printf '%s' "$value"
+}
+if [ -z "$LAYA_PYTHON" ]; then
+  FROM_FILE="$(env_python)"
+  if [ -n "$FROM_FILE" ] && [ -x "$FROM_FILE" ]; then LAYA_PYTHON="$FROM_FILE"; fi
+fi
+if [ -z "$LAYA_PYTHON" ]; then
+  LAYA_STATE="${LAYA_HOME:-$HOME/.laya-router}"
+  for candidate in \
+    "$LAYA_STATE/venv/bin/python" \
+    "$HOME/.laya-router/venv/bin/python" \
+    "$HOME/laya-venv/bin/python" \
+    "$HOME/.venvs/laya/bin/python" \
+    /opt/homebrew/bin/python3; do
+    if [ -x "$candidate" ]; then LAYA_PYTHON="$candidate"; break; fi
+  done
+fi
+: "${LAYA_PYTHON:=python3}"
+export LAYA_PYTHON
+export PATH="$(dirname "$NODE"):$(dirname "$LAYA_PYTHON"):/usr/bin:/bin:/usr/sbin:/sbin"
+
+exec "$NODE" "$REPO/src/daemon.mjs" "$@"

@@ -11,6 +11,23 @@ whole CLI session, so the ~40s model load is paid once and routing stays warm
 {"error": ...} line on stderr; the JS layer reads that as "keep the current model" —
 routing must never block a prompt.
 
+The model is loaded as soon as the process starts, and the caller is told how that went with
+lines that carry an "event" instead of an "id":
+
+  {"event": "loading"}                  the load has begun
+  {"event": "ready", "ms": 41210}       the model loaded and answered a real routing request
+  {"event": "failed", "error": "..."}   it did not; the next request tries again
+
+Without this the model loaded on the first prompt of the day, and that prompt waited for it.
+LAYA_EAGER_LOAD=0 turns it off: the model then loads on the first request, as it used to, and
+no event is sent. A caller that does not know these lines ignores them (they have no id).
+
+Two threads. The main one only reads: it echoes each request's id the moment the line arrives and
+queues the request, so the caller can always tell a busy model from one that cannot read its input.
+A single worker owns the model: it loads it (when eager), answers that first routing request, then
+answers the queue in order. One owner means no lock is needed around the model, and a prompt that
+arrives mid-load simply waits its turn behind the load.
+
 Request (one line):
 
   {
@@ -62,19 +79,33 @@ Design notes (verified against laya 0.3.4 on 2026-09-22/23):
 """
 
 import json
+import os
+import queue
 import sys
+import threading
 import time
 
 _ROUTER = None
 _FORCED = None
 
+# Both threads write to the same two streams, so a line is written whole under one lock and is
+# never cut in half by a line from the other thread.
+_OUT_LOCK = threading.Lock()
+
+
+def _send(obj, stream=None):
+    """One JSON line, written whole and flushed, so threads cannot interleave their lines."""
+    line = json.dumps(obj) + "\n"
+    with _OUT_LOCK:
+        out = stream or sys.stdout
+        out.write(line)
+        out.flush()
+
 
 def _get_router():
-    """Load the LAYA Router once per process and keep it warm."""
+    """Load the LAYA Router once per process and keep it warm. Only the worker thread calls this."""
     global _ROUTER, _FORCED
     if _ROUTER is None:
-        import os
-
         from laya import Router
 
         override = os.environ.get("LAYA_MODEL", "").strip()
@@ -106,9 +137,25 @@ def stakes(text):
     return "elevated" if hits == 1 else "normal"
 
 
+DIGEST_LIMIT = 600
+DIGEST_EDGE = 300
+
+
+def task_digest(text):
+    """Squash whitespace and fit the prompt in LAYA's token budget.
+
+    A long paste usually carries the ask at the start or at the end, so keep both ends and
+    drop the middle rather than cutting everything after the first 600 characters.
+    """
+    flat = " ".join(str(text).split())
+    if len(flat) <= DIGEST_LIMIT:
+        return flat
+    return f"{flat[:DIGEST_EDGE].rstrip()} [...] {flat[-DIGEST_EDGE:].lstrip()}"
+
+
 def build_state(payload):
     """Compact state digest: differentiating facts first, within the token budget."""
-    task_text = " ".join(str(payload.get("state", "")).split())[:600]
+    task_text = task_digest(payload.get("state", ""))
     risk = stakes(task_text)
     if risk == "high":
         routing_rule = (
@@ -182,6 +229,17 @@ def handle(payload):
                 "many: coordinated or stateful multi-step tool use",
             ],
         },
+        # Second routing signal: a yes/no probability that the work needs investigating an
+        # unknown cause, weighing design options, or changing several files. The blended
+        # score above cannot separate Haiku-shaped work from ordinary work well on its own
+        # (AUC 0.82 pooled over 116 labeled prompts); this vetoes the cases it would misplace.
+        "needs_judgment": {
+            "type": "noul",
+            "instructions": (
+                "Would doing this correctly require investigating an unknown cause, "
+                "weighing design options, or changing several files or modules?"
+            ),
+        },
         # Explanation-only N-way pick over the account's exact models. Emitted for
         # the explanation UI; NOT used for routing (uncalibrated on wide sets).
         "model_tier": {
@@ -204,6 +262,13 @@ def handle(payload):
         try:
             return max(0.0, min(float(a.get("score", 0)) / 2.0, 1.0))
         except (TypeError, ValueError):
+            return None
+
+    def noul_of(qid):
+        a = answers.get(qid) or {}
+        try:
+            return max(0.0, min(float(a["noul"]), 1.0))
+        except (KeyError, TypeError, ValueError):
             return None
 
     # Primary confidence signal: the mean of the three score-question confidences. The
@@ -248,12 +313,66 @@ def handle(payload):
             "taskComplexity": score_of("task_complexity"),
             "reasoningRequired": score_of("reasoning_required"),
             "toolComplexity": score_of("tool_complexity"),
+            "judgment": noul_of("needs_judgment"),
             "contextSize": min((payload.get("context_tokens") or 0) / 200000, 1.0),
         },
     }
 
 
+# The request the warm-up answers: a real routing decision, so "ready" means the whole path works.
+WARM_REQUEST = {
+    "id": None,
+    "state": "What is 2 + 2?",
+    "current_model": "claude-sonnet-5-5",
+    "context_tokens": 1000,
+    "models": [{"tier": "sonnet", "id": "claude-sonnet-5-5"}],
+}
+
+
+def warm():
+    """Load the model and answer one real routing request. Raises if either step fails."""
+    handle(dict(WARM_REQUEST))
+
+
+def _answer(payload):
+    """One request, answered or failed. The caller already has the echo."""
+    rid = payload.get("id")
+    started = time.time()
+    try:
+        out = handle(payload)
+    except Exception as err:  # noqa: BLE001 — fail-open: any failure keeps the current model
+        # The id rides on the error line too, so a failed request never desynchronizes the
+        # caller's response matching.
+        _send({"id": rid, "error": f"laya failed: {err}"}, sys.stderr)
+        return
+    out["ms"] = int((time.time() - started) * 1000)
+    _send(out)
+
+
+def _worker(jobs, eager):
+    """Owns the model: loads it first when eager, then answers requests in the order they came."""
+    if eager:
+        _send({"event": "loading"})
+        started = time.time()
+        try:
+            warm()
+        except Exception as err:  # noqa: BLE001 — reported; the next request tries the load again
+            _send({"event": "failed", "error": f"laya failed: {err}"})
+        else:
+            _send({"event": "ready", "ms": int((time.time() - started) * 1000)})
+    while True:
+        payload = jobs.get()
+        if payload is None:
+            return
+        _answer(payload)
+
+
 def main():
+    eager = os.environ.get("LAYA_EAGER_LOAD", "1") != "0"
+    jobs = queue.Queue()
+    # A daemon thread: if the caller goes away the process must not wait for a model that is
+    # still loading.
+    threading.Thread(target=_worker, args=(jobs, eager), name="laya-worker", daemon=True).start()
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -261,29 +380,21 @@ def main():
         try:
             payload = json.loads(line)
         except json.JSONDecodeError as err:
-            print(json.dumps({"id": None, "error": f"bad request json: {err}"}), file=sys.stderr)
-            sys.stderr.flush()
+            _send({"id": None, "error": f"bad request json: {err}"}, sys.stderr)
             continue
-        rid = payload.get("id")
-        # Echo the id BEFORE running the model: the caller runs a fast-fail timer on the
-        # echo, so a sidecar that loaded weights lazily would be killed mid-load on every
-        # cold start. The echo is the readiness signal; the model load happens once, on
-        # the first request, inside the caller's long deadline.
-        print(json.dumps({"id": rid}))
-        sys.stdout.flush()
-        started = time.time()
-        try:
-            out = handle(payload)
-        except Exception as err:  # noqa: BLE001 — fail-open: any failure keeps the current model
-            # The id rides on the error line too, so a failed request never desynchronizes
-            # the caller's response matching.
-            print(json.dumps({"id": rid, "error": f"laya failed: {err}"}), file=sys.stderr)
-            sys.stderr.flush()
-            continue
-        out["ms"] = int((time.time() - started) * 1000)
-        print(json.dumps(out))
-        sys.stdout.flush()
+        # Echo the id BEFORE the model is involved at all: the caller runs a fast-fail timer on
+        # the echo, and the model may be mid-load for a minute. The echo says "I read your line",
+        # nothing more.
+        _send({"id": payload.get("id")})
+        jobs.put(payload)
 
+
+if "--warm" in sys.argv[1:]:
+    # Setup probe: load the model, answer one real routing request, exit 0 only if it worked.
+    # Proves the venv, the weights download and the decision path all work before the user
+    # ever routes a real turn — a broken install surfaces here, not mid-session.
+    warm()
+    sys.exit(0)
 
 if __name__ == "__main__":
     main()

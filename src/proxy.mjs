@@ -1,7 +1,7 @@
 import http from "node:http";
 import https from "node:https";
 import { createHash } from "node:crypto";
-import { writeFileSync } from "node:fs";
+import { readFileSync, statSync, writeFileSync } from "node:fs";
 import {
   TIERS,
   tierOf,
@@ -10,14 +10,28 @@ import {
   tierSpec,
   isAuto,
   shouldUseExactModel,
+  EFFORT,
 } from "./config.mjs";
 import { askLaya } from "./router.mjs";
-import { decide } from "./policy.mjs";
+import { decide, effortFor, settleEffort } from "./policy.mjs";
+import { requestClass, adaptForModel, filterBetas } from "./wire.mjs";
 import { log } from "./log.mjs";
+import { createUsageTap, decoderFor, readableEncodings } from "./usage.mjs";
+import { parseLimitHeaders } from "./limits.mjs";
+import { PREFS_FILE, defaultPrefs, mergePrefs } from "./prefs.mjs";
 import { writeDecision, writeStatus } from "./status.mjs";
 
+// Upstream the proxy forwards to. Defaults to first-party Anthropic, which is what a Claude
+// subscription login uses. Set LAYA_CLAUDE_UPSTREAM only to route through an Anthropic-dialect
+// gateway; the tier ids in config.mjs are then that gateway's own slugs, not Anthropic's.
+// Resolved when the proxy starts, not at import: bin/laya-claude.mjs imports this module
+// before it loads ~/.laya-router.env, so a value kept in that file only exists after import.
 const ANTHROPIC_BASE_URL = "https://api.anthropic.com";
+const defaultUpstream = () => process.env.LAYA_CLAUDE_UPSTREAM || ANTHROPIC_BASE_URL;
 const debug = (line) => process.env.LAYA_DEBUG && log(line);
+
+/** A session idle this long has no warm prompt cache left to protect (Anthropic's is 5-60 min). */
+const IDLE_RESET_MS = 10 * 60 * 1000;
 
 /**
  * Claude Code converts draft-04 relics in MCP tool schemas before sending them first-party,
@@ -54,7 +68,10 @@ export function sanitizeSchema(node) {
  */
 export function newTurnPrompt(body) {
   if (!Array.isArray(body?.tools) || body.tools.length === 0) return null; // auxiliary call
-  const last = body?.messages?.[body.messages.length - 1];
+  // Claude Code appends a system-role entry to `messages`, after the user's own message, so
+  // the last conversational message is the last one that is not a system entry.
+  const conversational = (body?.messages ?? []).filter((m) => m?.role !== "system");
+  const last = conversational[conversational.length - 1];
   if (!last || last.role !== "user") return null;
   let text;
   if (typeof last.content === "string") {
@@ -68,8 +85,17 @@ export function newTurnPrompt(body) {
   } else {
     return null;
   }
-  return text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "").trim() || null;
+  const prompt = text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "").trim();
+  if (!prompt || SYNTHETIC_TURN.test(prompt)) return null;
+  return prompt;
 }
+
+/**
+ * Text Claude Code writes into the user role itself to continue a turn, which is not something
+ * the user typed. Measured: after a reply hit the output cap, Claude Code sent "Output token
+ * limit hit. Resume directly..." as a user message and it reached LAYA as the prompt.
+ */
+const SYNTHETIC_TURN = /^Output token limit hit\. Resume directly\b/;
 
 /**
  * Points a request at a tier, removing request fields that tier cannot accept. Claude Code
@@ -97,10 +123,20 @@ export function applyTier(body, tierName, model = idOf(tierName)) {
   return body;
 }
 
-/** Exact Claude models reported by the account, newest first; static ids are the cold-start fallback. */
-export function claudeModels(catalog = []) {
+/**
+ * Exact Claude models reported by the account, newest first; static ids are the cold-start
+ * fallback. OpenRouter's catalog also lists `<id>:batch` twins, which its messages endpoint
+ * answers with a 404, and each one is offered to LAYA as a choice, so they are dropped here.
+ *
+ * `fillMissingTiers` is for a gateway, where the tier ids in config.mjs are the gateway's own
+ * slugs. Some gateways answer Claude Code's discovery request with a curated catalog that
+ * leaves a whole tier out (OpenRouter returns no Haiku and no Sonnet to it), and a tier that
+ * is absent reads as unavailable, so every decision would step up to Opus. Against
+ * first-party Anthropic the static ids are the wrong format, so this stays off there.
+ */
+export function claudeModels(catalog = [], { fillMissingTiers = false } = {}) {
   const models = catalog
-    .filter((model) => tierOf(model?.id))
+    .filter((model) => tierOf(model?.id) && !String(model.id).endsWith(":batch"))
     .map((model) => ({
       id: model.id,
       tier: tierOf(model.id),
@@ -110,9 +146,11 @@ export function claudeModels(catalog = []) {
         model.max_input_tokens && `${model.max_input_tokens} input tokens`,
       ].filter(Boolean).join("; "),
     }));
-  return models.length
-    ? models
-    : TIERS.map((tier) => ({ id: tier.id, tier: tier.name, description: tier.id }));
+  const staticFor = (tier) => ({ id: tier.id, tier: tier.name, description: tier.id });
+  if (!models.length) return TIERS.map(staticFor);
+  if (!fillMissingTiers) return models;
+  const covered = new Set(models.map((model) => model.tier));
+  return [...models, ...TIERS.filter((tier) => !covered.has(tier.name)).map(staticFor)];
 }
 
 const modelForTier = (models, tier) => models.find((model) => model.tier === tier)?.id ?? idOf(tier);
@@ -167,7 +205,37 @@ export function observeModel(state, current) {
 }
 
 
-export async function startProxy({ upstreamURL = ANTHROPIC_BASE_URL, route = askLaya } = {}) {
+/**
+ * The app's settings, read per request. A control file only exists when the background app is
+ * running; without one the proxy behaves exactly as it did on its own, which is what the
+ * command-line launcher relies on.
+ */
+let prefsCache = { mtimeMs: 0, value: null };
+function readPrefs() {
+  if (process.env.LAYA_DISABLE_PREFS === "1") return null;
+  try {
+    // Cached on the file's mtime, not on a timer, so a setting changed in the app takes effect
+    // on the very next turn instead of up to a second later. One stat per request.
+    const { mtimeMs } = statSync(PREFS_FILE());
+    if (mtimeMs === prefsCache.mtimeMs) return prefsCache.value;
+    // Through the same validator the daemon writes with, so the two always agree on what a file
+    // means: a field the file lacks takes its default (routing on), it is never read as "off".
+    const value = mergePrefs(defaultPrefs(), JSON.parse(readFileSync(PREFS_FILE(), "utf8")));
+    prefsCache = { mtimeMs, value };
+    return value;
+  } catch {
+    prefsCache = { mtimeMs: 0, value: null };
+    return null;
+  }
+}
+
+export async function startProxy({
+  upstreamURL = defaultUpstream(),
+  route = askLaya,
+  onEvent = null,
+  onLimits = null,
+  port: wantedPort = 0,
+} = {}) {
   // Tier routed for each conversation's turn in flight, reused by its follow-up requests and
   // by the cache-rebuild guard, which needs to know what the prompt cache was built on.
   const convos = new Map();
@@ -189,6 +257,18 @@ export async function startProxy({ upstreamURL = ANTHROPIC_BASE_URL, route = ask
     req.on("data", (c) => chunks.push(c));
     req.on("end", async () => {
       let out = Buffer.concat(chunks);
+      let routedModel = null;
+      // What this request is, for the app's live feed: a tap on the response reads the token
+      // usage the API itself reports, and the rest is the decision already made above.
+      let report = null;
+      const emit = (event) => {
+        if (!onEvent) return;
+        try {
+          onEvent(event);
+        } catch (err) {
+          debug(`event hook failed: ${err.message}`);
+        }
+      };
 
       if (/^\/v1\/messages/.test(req.url ?? "")) {
         try {
@@ -209,29 +289,90 @@ export async function startProxy({ upstreamURL = ANTHROPIC_BASE_URL, route = ask
             if (Array.isArray(body.tools)) {
               writeStatus(sessionOf(body), { manual: true, at: Date.now() });
             }
+            if (onEvent) {
+              report = {
+                kind: "manual",
+                model: body.model,
+                tier: tierOf(body.model) ?? null,
+                reason: "you chose this model",
+                session: sessionOf(body),
+              };
+            }
           } else {
             const key = conversationKey(body);
             const state = stateFor(key);
             // What the prompt cache was built on, which is what a downgrade would discard.
             const current = state.tier ?? "opus";
-            const prompt = newTurnPrompt(body);
+            // Claude Code labels each request when CLAUDE_CODE_GATEWAY_HINT_HEADERS=1. Only a
+            // "main" request can be a message the user wrote; the rest ride the session's tier
+            // (sub-agents, compaction, workflows) or go to the cheap model (background work).
+            const cls = requestClass(req.headers);
+            const humanTurn = cls === undefined || cls === "main";
+            const prompt = humanTurn ? newTurnPrompt(body) : null;
             const explaining = prompt?.includes("<laya-explain>");
             let fresh = null;
-            if (prompt && !explaining) {
-              const models = claudeModels([...catalog.values()]).filter((model) =>
-                availableTiers().includes(model.tier),
-              );
+            let laya = null;
+            let reason = null;
+            // `tier`/`model` are the pair this request is served by: the forced one for
+            // background or paused work, otherwise the decision. Declared once here so the
+            // routing branch and the rewrite below cannot disagree.
+            let tier = state.forceTier ?? state.tier ?? current;
+            let model = state.forceModel ?? state.model ?? idOf(tier);
+            if (cls === "auxiliary") {
+              state.forceModel = idOf("haiku");
+              state.forceTier = "haiku";
+              if (onEvent) report = { kind: "routed", tier: "haiku", reason: "background" };
+            } else {
+              state.forceModel = state.forceTier = undefined;
+            }
+            // The app's settings, when it is running: the master switch, which tiers the
+            // router may pick, and whether the router chooses effort at all. Without the app
+            // these are null and the proxy behaves exactly as the command-line launcher does.
+            const prefs = readPrefs();
+            if (prefs && !prefs.enabled) {
+              // Paused: every turn runs on one fixed model, untouched. The conversation's
+              // routing state is cleared so that turning routing back on starts from the
+              // router's own decision rather than inheriting what it decided before the pause.
+              state.tier = state.model = undefined;
+              state.effort = undefined;
+              state.lastReason = "routing is off";
+              const paused = idOf(prefs.pausedTier) ?? idOf("opus");
+              state.forceTier = prefs.pausedTier;
+              state.forceModel = paused;
+              debug(`${key} routing paused, serving ${paused}`);
+              if (onEvent) report = { kind: "paused", tier: prefs.pausedTier, reason: "routing is off", session: sessionOf(body) };
+            } else if (prompt && !explaining) {
+              // Only a gateway needs its missing tiers filled in: the static tier ids are that
+              // gateway's slugs. Against first-party Anthropic they are the wrong format.
+              // The fill decides which tiers exist and what each resolves to; the options
+              // LAYA is asked to choose between stay the account's real models.
+              const inTier = (model) => availableTiers(prefs?.tiers).includes(model.tier);
+              const catalogModels = claudeModels([...catalog.values()]).filter(inTier);
+              const models = claudeModels([...catalog.values()], {
+                fillMissingTiers: upstreamURL !== ANTHROPIC_BASE_URL,
+              }).filter(inTier);
               const available = [...new Set(models.map((model) => model.tier))];
               const currentModel = state.model ?? modelForTier(models, current);
               const contextTokens = Math.round(JSON.stringify(body.messages).length / 4);
-              const laya = await route({ prompt, current: currentModel, contextTokens, models });
-              const { tier, reason } = decide({
+              laya = await route({ prompt, current: currentModel, contextTokens, models: catalogModels });
+              // No ongoing decision to protect: a session that is new, has been idle, or was
+              // just compacted may move either way; otherwise the tier only goes up.
+              const idleMs = Date.now() - (state.lastSeen ?? 0);
+              const freshSession = state.tier === null || idleMs > IDLE_RESET_MS || state.freshNext === true;
+              // A tier switched off in the app is not offered to the router at all, so a
+              // decision can never land on it and the substitute steps up instead.
+              const allowed = prefs?.tiers
+                ? available.filter((t) => prefs.tiers[t] === true)
+                : available;
+              ({ tier, reason } = decide({
                 prompt,
                 laya,
                 current,
-                available,
+                available: allowed.length ? allowed : available,
                 contextTokens,
-              });
+                fresh: freshSession,
+              }));
+              state.freshNext = false;
               // The N-way pick is explanation-only for policy, but when the rubric decision
               // was accepted and the pick landed in the same tier, its exact model carries
               // LAYA's version preference within that tier.
@@ -242,9 +383,20 @@ export async function startProxy({ upstreamURL = ANTHROPIC_BASE_URL, route = ask
                   : tier === current
                     ? currentModel
                     : modelForTier(models, tier);
+              // Effort is decided with the tier and held by the same ratchet, unless the
+              // app has effort turned off, in which case the model keeps whatever it chose.
+              state.effort = prefs?.effortAuto === false
+                ? undefined
+                : settleEffort({
+                  target: effortFor(tier, laya?.metrics),
+                  previous: state.effort ?? null,
+                  fresh: freshSession,
+                  tierChanged: tier !== current,
+                });
               state.tier = tier;
               state.model = model;
               fresh = {
+                effort: state.effort,
                 prompt,
                 model,
                 confidence: laya?.confidence ?? null,
@@ -259,10 +411,39 @@ export async function startProxy({ upstreamURL = ANTHROPIC_BASE_URL, route = ask
             }
             // The sentinel is not a real model, so every routed request must be rewritten,
             // including follow-ups that reuse the tier chosen for the turn.
-            const tier = state.tier ?? current;
-            const model = state.model ?? idOf(tier);
-            debug(`${key} rewrite ${body.model} -> ${model}`);
+            // Recomputed after the decision: the forced tier wins for background and paused
+            // work, otherwise this is the tier the router chose for this turn.
+            tier = state.forceTier ?? state.tier ?? current;
+            model = state.forceModel ?? state.model ?? idOf(tier);
+            debug(`${key} rewrite ${body.model} -> ${model}${cls ? ` [${cls}]` : ""}`);
             applyTier(body, tier, model);
+            // Only the launcher's default marks "the user did not choose"; a level they set
+            // themselves (/effort, --effort) is left exactly as sent.
+            if (state.effort && body.output_config?.effort === EFFORT.launcherDefault) {
+              body.output_config.effort = state.effort;
+            }
+            // Claude Code shaped this request for Opus. Whatever is per-model rather than
+            // per-tier (system-role messages, max_tokens, betas) is fixed for the model chosen.
+            const adapted = adaptForModel(body, model);
+            if (adapted.folded || adapted.capped) {
+              debug(`${key} adapted for ${model}: ${adapted.folded ? `folded ${adapted.folded} system message(s) ` : ""}${adapted.capped ? `max_tokens<=${adapted.capped}` : ""}`);
+            }
+            routedModel = model;
+            if (onEvent) {
+              report = {
+                ...(report ?? { kind: "routed" }),
+                tier,
+                model,
+                effort: body.output_config?.effort ?? null,
+                reason: report?.reason ?? reason ?? null,
+                session: sessionOf(body),
+                prompt: humanTurn ? (prompt ?? undefined) : undefined,
+                ms: laya?.ms ?? null,
+                confidence: laya?.confidence ?? null,
+              };
+            }
+            if (cls === "compaction") state.freshNext = true;
+            state.lastSeen = Date.now();
             // Publish what went out. Claude Code's UI shows the row you picked, not the tier
             // it resolved to, so the status line is the only place this is visible.
             // `claude -p` omits metadata on the first request of a session, so there is no
@@ -283,8 +464,20 @@ export async function startProxy({ upstreamURL = ANTHROPIC_BASE_URL, route = ask
       const transport = target.protocol === "http:" ? http : https;
       const headers = { ...req.headers, host: target.host };
       delete headers["content-length"];
+      if (routedModel && headers["anthropic-beta"]) {
+        headers["anthropic-beta"] = filterBetas(headers["anthropic-beta"], routedModel);
+      }
       if (req.method === "GET" && /^\/v1\/models(?:\?|$)/.test(req.url ?? "")) {
         delete headers["accept-encoding"];
+      }
+      // A turn is only measured if its response can be read, and the API compresses streams
+      // (measured: content-encoding gzip). So when something is listening, offer the client's own
+      // list cut down to what can be decoded here. With nothing listening the proxy stays a pure
+      // pass-through and the header is left exactly as the client sent it.
+      if (report) {
+        const offer = readableEncodings(headers["accept-encoding"]);
+        if (offer) headers["accept-encoding"] = offer;
+        else delete headers["accept-encoding"];
       }
       // Under LAYA_DEBUG, ask for an uncompressed stream so the model the API reports can be
       // read back out of it. Not worth the bandwidth cost in normal operation.
@@ -302,6 +495,10 @@ export async function startProxy({ upstreamURL = ANTHROPIC_BASE_URL, route = ask
           if (isModels) {
             const chunks = [];
             up.on("data", (chunk) => chunks.push(chunk));
+            // This path waits for the whole body, so a cut-off one would wait forever.
+            up.once("close", () => {
+              if (!up.complete) res.destroy();
+            });
             up.on("end", () => {
               const data = Buffer.concat(chunks);
               try {
@@ -319,6 +516,18 @@ export async function startProxy({ upstreamURL = ANTHROPIC_BASE_URL, route = ask
             return;
           }
           res.writeHead(up.statusCode, up.headers);
+          // The plan's limits ride on every response. Reading them here is free (no extra call),
+          // covers turns the user pinned to a model as well as routed ones, and covers a 429,
+          // which is the moment the figure matters most. The client still gets the headers: Claude
+          // Code reads them too. A listener that throws must never cost the user a response.
+          if (onLimits) {
+            try {
+              const reading = parseLimitHeaders(up.headers);
+              if (reading) onLimits(reading);
+            } catch (err) {
+              debug(`onLimits failed: ${err.message}`);
+            }
+          }
           // Report the model the API itself says it used, so the routing can be confirmed
           // from the wire rather than trusted from our own decision log. Claude Code's UI
           // always shows the model it asked for, never the one we rewrote to.
@@ -333,6 +542,52 @@ export async function startProxy({ upstreamURL = ANTHROPIC_BASE_URL, route = ask
             });
           }
           up.pipe(res);
+          // pipe() ends the client's response when the upstream finishes, and does nothing at all
+          // when the upstream is cut off. Measured: a response dropped mid-stream left the client
+          // waiting forever, with the committed proxy as well as this one. Closing the client's
+          // connection is the honest answer: Claude Code sees a reset and retries, instead of
+          // hanging on bytes that are never coming.
+          // `close` is emitted after an abort as well as after a normal end (and after `error`), so
+          // it is the one place that sees every way the upstream can stop; `complete` says whether
+          // the whole message arrived.
+          up.once("close", () => {
+            if (!up.complete) res.destroy();
+          });
+          // Reading the response as it passes through is how the app learns what a turn
+          // actually cost. The tap must not change what the client receives, so it observes
+          // copies on a separate listener and the pipe is untouched.
+          if (report) {
+            // Exactly one event per request, whatever happens to the response: with its cost when
+            // the usage could be read, without one when it could not. A decision that was made is
+            // worth showing even when its price is unknown; dropping it made the feed look empty.
+            let reported = false;
+            const finish = (usage, model) => {
+              if (reported) return;
+              reported = true;
+              emit({ ...report, model: report.model ?? model ?? undefined, ...(usage ? { usage } : {}), kind: report.kind ?? "routed" });
+            };
+            const tap = createUsageTap(({ usage, model }) => finish(usage, model));
+            const settle = () => {
+              tap.end();
+              finish(null, null);
+            };
+            // The tap reads a COPY, undone from whatever compression the API used. The client's
+            // own pipe above is untouched, so it still gets the compressed bytes it asked for.
+            const decoder = decoderFor(up.headers["content-encoding"]);
+            const contentType = String(up.headers["content-type"] ?? "");
+            if (decoder) {
+              decoder.on("data", (chunk) => tap.push(chunk, contentType));
+              decoder.once("end", settle);
+              decoder.once("error", settle);
+              up.on("data", (chunk) => decoder.write(chunk));
+              up.once("close", () => decoder.end());
+            } else {
+              // null: nothing to undo. undefined: an encoding that cannot be read, so the copy is
+              // ignored and the request is reported without a cost.
+              if (decoder === null) up.on("data", (chunk) => tap.push(chunk, contentType));
+              up.once("close", settle);
+            }
+          }
         },
       );
       upstream.on("error", (e) => {
@@ -345,6 +600,21 @@ export async function startProxy({ upstreamURL = ANTHROPIC_BASE_URL, route = ask
     });
   });
 
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  // A wanted port lets a session that is already running keep talking to the same address across
+  // a daemon restart. If something else holds it, any free port is better than refusing to start.
+  await new Promise((resolve, reject) => {
+    const bind = (n, retry) => {
+      const onError = (err) => {
+        if (retry && err.code === "EADDRINUSE") return bind(0, false);
+        reject(err);
+      };
+      server.once("error", onError);
+      server.listen(n, "127.0.0.1", () => {
+        server.off("error", onError);
+        resolve();
+      });
+    };
+    bind(wantedPort, wantedPort !== 0);
+  });
   return { port: server.address().port, close: () => server.close() };
 }

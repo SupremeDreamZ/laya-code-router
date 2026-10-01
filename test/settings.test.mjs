@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readSavedModel, restoreSavedModel } from "../src/settings.mjs";
+import { readSavedModel, restoreSavedModel, sessionSettings } from "../src/settings.mjs";
 
 const fileWith = (settings) => {
   const file = join(mkdtempSync(join(tmpdir(), "laya-settings-")), "settings.json");
@@ -40,4 +40,40 @@ test("leaves a real model the user chose during the session alone", () => {
 
 test("a missing or unreadable settings file is not an error", () => {
   assert.equal(restoreSavedModel("opus", join(tmpdir(), "nope", "settings.json")), false);
+});
+
+// Measured with the real claude 2.1.285 binary: a user-level settings.json `env` block beats
+// the process environment, so a launcher that only sets ANTHROPIC_BASE_URL in the process
+// env is silently bypassed for anyone routing Claude Code through a gateway. Passing the
+// same keys through --settings wins, and the proxy is reached.
+test("session settings pin the proxy URL in env so a user-level base URL cannot bypass it", () => {
+  const settings = sessionSettings({ baseURL: "http://127.0.0.1:5555" });
+  assert.equal(settings.env.ANTHROPIC_BASE_URL, "http://127.0.0.1:5555");
+});
+
+test("session settings do not overwrite the user's own auth or model configuration", () => {
+  const { env } = sessionSettings({ baseURL: "http://127.0.0.1:5555" });
+  // The token has to keep coming from the user's own settings; this file is written to a
+  // shared temp directory and must never hold a credential.
+  for (const key of ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL"]) {
+    assert.equal(key in env, false, `${key} must not be set by the launcher`);
+  }
+});
+
+test("session settings carry the status line only when asked to", () => {
+  const command = "node /x/laya-statusline.mjs";
+  assert.deepEqual(sessionSettings({ baseURL: "http://127.0.0.1:1", statusLineCommand: command }).statusLine, {
+    type: "command",
+    command,
+  });
+  assert.equal("statusLine" in sessionSettings({ baseURL: "http://127.0.0.1:1" }), false);
+});
+
+// Anthropic (code.claude.com/docs/en/model-config): effort defaults to `high` on every model that
+// supports it EXCEPT Opus 5.5 and Sonnet 5.5, which default to `medium`; "in tests Opus 5.5 at
+// medium matches or exceeds Opus 5 at high". Measured with claude 2.1.285: launched with the
+// router's sentinel model, Claude Code sends `high` (it does not know the model), so every routed
+// request would think harder and spend more than a plain `claude` session.
+test("session settings restore the documented default effort, which the sentinel model loses", () => {
+  assert.equal(sessionSettings({ baseURL: "http://127.0.0.1:1" }).effortLevel, "medium");
 });

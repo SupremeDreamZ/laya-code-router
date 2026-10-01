@@ -1,159 +1,149 @@
 # laya-code-router
 
-Automatic per-turn model routing for Claude Code and OpenAI Codex, powered by **local LAYA**
-(`convaiinnovations/laya`) instead of a hosted decision API. Simple work goes to the fast
-tier, difficult work to the strong tier — $0, no API key for routing, nothing sent to any
-third-party service for the decision.
+Routes each [Claude Code](https://code.claude.com/docs/en/setup) turn to the cheapest model that
+can do it: Haiku for lookups, Sonnet for ordinary coding, Opus for hard work. It runs on **your own
+Claude plan** (Pro or Max), uses no API key, and the routing decision is made by a small local
+model ([LAYA](https://huggingface.co/convaiinnovations/laya)), so your prompt text goes nowhere
+but your own machine.
 
-Ported from [gargpratyush/jev-router](https://github.com/gargpratyush/jev-router) (MIT): the
-hosted TypeSafe Jev HTTP call is replaced with an in-process LAYA sidecar. The launcher,
-loopback proxy, sentinel model, per-session state, status line, and Codex commentary
-architecture are unchanged; routing never leaves your machine.
+It ships with a macOS menu-bar app that shows your plan usage, what each turn was routed to, and
+what you saved against running everything on Opus.
 
-| Command | Interface | Authentication | Routing decision |
-| --- | --- | --- | --- |
-| `laya-claude` | Claude Code | Existing `claude login` | Status line |
-| `laya-codex` | OpenAI Codex | Existing `codex login` | Commentary line |
+Ported from [gargpratyush/jev-router](https://github.com/gargpratyush/jev-router) (MIT): the hosted
+decision call is replaced with a local sidecar, and the app, installer and usage tracking are new.
 
-Both commands launch the real upstream CLI. Laya only chooses the model for a fresh user turn.
-
-## Requirements
-
-- Node.js 20.12+
-- Python 3.10+ with the `laya` package (`pip install laya`) and its weights
-  (`convaiinnovations/laya`, downloaded automatically on first use — ~40s once, then cached)
-- At least one supported CLI: [Claude Code](https://code.claude.com/docs/en/setup) or
-  [OpenAI Codex](https://developers.openai.com/codex/cli)
-
-Point the launcher at your interpreter if `python3` is not the one with `laya`:
+## Install (macOS)
 
 ```bash
-echo "LAYA_PYTHON=$HOME/laya-venv/bin/python" >> ~/.laya-router.env
+git clone https://github.com/SupremeDreamZ/laya-code-router ~/.laya-router/repo
+bash ~/.laya-router/repo/setup.sh
 ```
 
-## Quick start
+Needs Node 20.12+, Python 3.10+, about 1.5 GB of disk, and Xcode's command-line tools for the
+app (`xcode-select --install`). Setup checks all of it first and tells you what is missing.
+It builds the model environment (a one-time download of about 1 GB), installs the menu-bar app,
+starts the router, and registers it to start at login. Safe to run again.
 
 ```bash
-npm install -g laya-code-router
-laya-claude        # or: laya-codex
+./setup.sh --check       look at this Mac, change nothing
+./setup.sh --cli-only    skip the menu-bar app (the launcher works alone, Linux included)
+./setup.sh --uninstall   remove the app and the login item; your settings and usage stay
 ```
 
-Routing is on by default and needs no key: the decision model runs locally, so there is no
-hosted call to authorize. No Anthropic or OpenAI API key is required when the CLI is already
-logged in. Every CLI argument is forwarded:
+Then start a session with `laya-claude` instead of `claude`. It forwards every argument:
 
 ```bash
+laya-claude
 laya-claude --resume
 laya-claude -p "fix the failing test"
-laya-codex resume --last
 ```
 
-## How it works
+Plain `claude` is not routed. Sign-in stays Claude Code's own: if you are signed out, the app says
+so and `claude auth login` fixes it. Nothing here asks for your credentials.
 
-Each command starts a loopback proxy and a long-lived LAYA sidecar, launches the real CLI,
-and forwards the CLI's existing authorization headers without reading, storing, or modifying
-them. The sidecar answers one NDJSON line per routing decision and stays warm for the whole
-session, so the model load is paid once.
+## What it does
 
-```text
-you -> Claude Code -> laya-claude proxy -> Anthropic
-                         |            \
-                         +-> LAYA sidecar (local, ~40-50ms warm)
+One routing decision per fresh user turn. LAYA scores the prompt on three rubrics (task
+complexity, reasoning required, tool complexity) and one judgment question; `src/policy.mjs` turns
+the scores into a tier:
 
-you -> OpenAI Codex -> laya-codex proxy -> OpenAI
-                         |            \
-                         +-> LAYA sidecar
-```
+- an explicit request such as `use opus` or `use haiku` always wins;
+- a mean score of 0.515 or more goes to **Opus**;
+- below 0.48 with a judgment score under 0.45 goes to **Haiku**, and below 0.396 goes to Haiku
+  whatever the judgment says;
+- everything between goes to **Sonnet**;
+- design work never goes to Haiku;
+- within a session the tier only goes up, because Anthropic's prompt cache belongs to one model
+  and a downgrade makes the next request start cold;
+- a model you have switched off is skipped upward, never downward;
+- Fable is off unless you turn it on.
 
-Claude Code uses `ANTHROPIC_BASE_URL`; Codex uses a temporary custom provider with
-`requires_openai_auth=true`. Both use `laya-router` as the routing sentinel. Any concrete
-model selected by the user passes through unchanged. The user's prompt text goes only to the
-local LAYA sidecar — never to a third party.
+If the routing model fails, is slow, or is not loaded, the turn goes on with the model it already
+has. Routing never holds a prompt for more than 15 seconds (60 while the model is still loading).
 
-## Routing policy
+### Measured, not promised
 
-One LAYA call per fresh user turn scores three rubrics (task complexity, reasoning required,
-tool complexity) on a trivial/ordinary/hard scale. `src/policy.mjs` then applies these rules:
+The Haiku cut was fitted on 116 labelled prompts: 59% of Haiku-shaped work reaches Haiku, 30% of
+Sonnet-shaped work is tried on Haiku first, and none of 37 Opus-shaped prompts is. It has not been
+re-fitted since. LAYA's wide-choice head is uncalibrated, so only the score rubrics drive routing.
 
-- explicit requests such as `use opus`, `use luna`, or `use strong` win;
-- failure, timeout, or a sidecar crash keeps the current model;
-- the mean rubric score maps onto a tier deterministically:
-  - `>= 0.62` → strong (Opus / `gpt-5.6-sol`)
-  - `< 0.18` → fast (Haiku / `gpt-5.6-luna`)
-  - between → balanced (Sonnet / `gpt-5.6-terra`)
-- low confidence (below `minConfidence`) never downgrades and caps upgrades at the balanced tier;
-- large conversations refuse downgrades that would waste more prompt-cache work than they save;
-- unavailable tiers step upward rather than silently choosing a weaker model;
-- the long tier (Fable / `gpt-6-astra`) is disabled unless `LAYA_ALLOW_FABLE=1`.
+## The menu-bar app
 
-### Calibration notes (measured 2026-09-23, M2 Max, default checkpoint)
+- the plan's 5-hour and weekly usage, with reset times, and the figure beside the icon;
+- the last decision and why, and a history of turns;
+- what the turns would have cost at list prices against what they did, with the baseline
+  (Opus by default) changeable in settings;
+- usage alerts at levels you choose, when a limit is hit, and when it resets;
+- how eagerly it saves (Save most, Balanced, Careful), which models it may use, and a one-click
+  new session in the terminal of your choice.
 
-- LAYA's N-way choice head is **uncalibrated for wide option sets** (7-option confidence
-  0.02-0.03, near-flat distribution). The N-way pick is sent for the explanation UI only and
-  never drives routing — the score rubric carries the decision.
-- The score rubric separates genuinely hard work upward (0.62+: auth redesign, whole-repo
-  migration) but does not distinguish trivial from ordinary prompts (both land 0.44-0.51 —
-  differences there are noise). The saving comes from the no-router baseline, which pins the
-  session at Opus: ordinary work drops to the balanced tier instead of riding Opus all session.
-- The confidence gate is calibrated to the observed distribution (0.16-0.44 across classes);
-  the upstream 0.3 default would cap nearly every upgrade with this checkpoint.
-- `convaiinnovations/laya-typed-decisions` was measured **worse** (classes fully overlap,
-  0.54-0.67) and is not the default. A calibrated checkpoint drops in via `LAYA_MODEL`
-  without protocol changes.
+Your plan does not bill per token, so the cost figure is what the same turns would have cost at
+Anthropic's list prices. It is an estimate, and it says so.
 
-Tool-loop continuations keep the tier chosen at the start of the turn. Main conversations and
-sub-agents are pinned separately. Routing is fail-open: a LAYA failure never blocks the CLI.
+The usage figure is read from Claude Code's own cache through `claude -p /usage`, which costs no
+tokens and calls no model. That cache is undocumented and was checked on Claude Code 2.1.286 only;
+if it changes the figure falls back to the rate-limit headers on routed turns, and the bar shows a
+dash rather than a wrong number.
 
-## Configuration
+## Cost to run it
+
+The routing model stays loaded so decisions are instant. Measured on an M2 Max: it loads in about
+6 to 10 seconds, holds about **1.3 GB of memory** while the router runs, and a decision then takes
+roughly 200 to 500 ms. Set `LAYA_EAGER_LOAD=0` to load it on the first prompt instead (the first
+prompt then waits for the load, and memory is held only after that).
+
+## Settings
+
+Put these in `~/.laya-router.env` or the environment.
 
 | Variable | Effect |
 | --- | --- |
-| `LAYA_PYTHON` | Python interpreter with the `laya` package (default: `python3`). |
-| `LAYA_DISABLE_ROUTING` | Set to `1` to launch the CLI untouched with no proxy or sidecar (routing is on by default). `LAYA_NO_ROUTING=1` is an alias. |
-| `LAYA_MODEL` | Force a specific checkpoint repo (HF id) for all decisions. |
-| `LAYA_ALLOW_FABLE` | Enables the opt-in long tier. |
-| `LAYA_DEBUG` | Logs decisions and rewrites to `~/.laya-claude.log` in interactive sessions. |
-| `LAYA_DUMP` | Dumps request bodies for debugging wire-format changes. |
-| `LAYA_NO_STATUSLINE` | Disables the injected Claude status line. |
-| `LAYA_CODEX_FAST_MODEL` / `LAYA_CODEX_BALANCED_MODEL` / `LAYA_CODEX_STRONG_MODEL` / `LAYA_CODEX_LONG_MODEL` | Codex tier models; defaults to `gpt-5.6-luna` / `gpt-5.6-terra` / `gpt-5.6-sol` / `gpt-6-astra`. |
+| `LAYA_PYTHON` | Python with the `laya` package (setup writes this). |
+| `LAYA_EAGER_LOAD` | `0` loads the model on the first prompt instead of at start. |
+| `LAYA_DEADLINE_MS` | Longest a prompt waits for a decision. Default 15000, 1 s to 10 min. |
+| `LAYA_LOAD_DEADLINE_MS` | The same while the model is still loading. Default 60000. |
+| `LAYA_LOAD_GIVE_UP_MS` | A model that never loads is replaced after this. Default 300000. |
+| `LAYA_PLAN_TICK_MS` | How often usage is checked (default 5 min); `off` disables. |
+| `LAYA_DISABLE_ROUTING` | `1` launches Claude Code untouched, with no proxy or model. |
+| `LAYA_NO_DAEMON` | `1` keeps a session private even while the app runs. |
+| `LAYA_MODEL` | Use a different LAYA checkpoint for every decision. |
+| `LAYA_ALLOW_FABLE` | Enables the opt-in long tier when the app is not running. |
+| `LAYA_DEBUG` | Logs decisions to `~/.laya-claude.log`. |
 
-Existing environment variables have highest precedence, followed by `.env` in the launch
-directory, `~/.laya-router.env`, and the legacy `~/.laya-claude.env`.
+A value that is not a plain whole number in range is ignored and the default is used.
 
-## Differences from upstream (jev-router)
+## How it fits together
 
-- The hosted TypeSafe Jev call is replaced with a local LAYA sidecar (Python child process,
-  NDJSON line protocol, id-echo handshake). `$0`, no key, nothing leaves the machine.
-- The tier decision comes from a deterministic score→tier table, not an N-way model pick
-  (LAYA's choice head is uncalibrated on wide sets — see Calibration notes).
-- No third-party dependency at runtime: `@typesafe-ai/sdk` is gone; the sidecar is stdlib
-  plus `laya`.
-- The sidecar is killed when the launcher exits, so no orphaned model processes are left
-  behind.
+```text
+you -> laya-claude -> loopback proxy -> Anthropic
+                         |
+                         +-> LAYA sidecar (local, one Python process)
+LayaBar.app <-> daemon (login item) -- settings, usage, history
+```
+
+`laya-claude` starts Claude Code with `ANTHROPIC_BASE_URL` pointed at a loopback proxy and the model
+set to a sentinel, `laya-router`. The proxy forwards Claude Code's own authorization headers without
+reading or storing them, picks the model for each fresh turn, and passes any model you chose yourself
+straight through. The menu-bar app and the daemon are two processes on purpose: the daemon is the
+router and outlives the app being closed.
+
+## Limitations
+
+- The app is macOS only. The command-line launcher also runs on Linux.
+- Claude Code's request format is not a public contract; `LAYA_DUMP` helps diagnose a change.
+- Tested against Claude Code 2.1.286 on macOS 26 (Apple silicon).
+- The router also ships a Codex launcher (`laya-codex`); it is not covered by this guide.
+- Light mode, and the sign-in button's browser hand-off, have not been checked.
 
 ## Development
 
 ```bash
 npm install
-npm test
-LAYA_PYTHON=/path/to/laya-venv/bin/python npm run live-routing
-node bin/laya-claude.mjs -p "what is 2+2?"
+npm test                                  # 657 tests, about 90 s
+cd apps/LayaBar && swift test             # the app's tests
+LAYA_PYTHON=~/.laya-router/venv/bin/python npm run live-routing   # real weights, no key
 ```
-
-The test suite covers shared policy (rubric mapping, overrides, confidence gates, cache
-guard, tier substitution), both request formats, model rewriting, capability handling,
-settings restoration, Codex authentication forwarding, native model-picker injection, and
-decision display. `npm run live-routing` exercises the real local LAYA weights.
-
-## Limitations
-
-* The first decision of a session pays the ~40s model load; the launcher pre-warms the
-  sidecar while the CLI starts, so interactive use rarely waits.
-* Claude Code and Codex request formats are not public contracts. Use `LAYA_DUMP` to
-  diagnose upstream changes.
-* The local LAYA checkpoint's score head is only as good as its training — see Calibration
-  notes for measured behavior, and re-calibrate when swapping checkpoints via `LAYA_MODEL`.
 
 ## License
 
-MIT — inherited from [gargpratyush/jev-router](https://github.com/gargpratyush/jev-router).
+MIT, inherited from [gargpratyush/jev-router](https://github.com/gargpratyush/jev-router).
