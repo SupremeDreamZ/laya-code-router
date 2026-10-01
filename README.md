@@ -139,7 +139,7 @@ router and outlives the app being closed.
 
 ```bash
 npm install
-npm test                                  # 657 tests, about 90 s
+npm test                                  # 666 tests, about 90 s
 cd apps/LayaBar && swift test             # the app's tests
 LAYA_PYTHON=~/.laya-router/venv/bin/python npm run live-routing   # real weights, no key
 ```

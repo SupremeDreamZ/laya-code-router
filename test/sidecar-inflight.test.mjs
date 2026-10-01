@@ -381,6 +381,34 @@ test("the timers an ask leaves behind do not keep a finished process alive", asy
   assert.ok(exitedAt - answered < 1500, `it exited ${exitedAt - answered} ms after its work was done, not after its 4 s deadline or 5 s echo window`);
 });
 
+test("the echo timer of an ask that never got an echo does not keep a finished process alive either", async (t) => {
+  // When the sidecar answers nothing at all, not even the echo, the 5 s echo timer is still pending when
+  // the ask has ended by its deadline. It is the only thing left to hold the process, and it must not.
+  const dir = mkdtempSync(join(tmpdir(), "laya-exit2-"));
+  const script = `
+    import { getSidecar } from ${JSON.stringify(join(REPO, "src", "router.mjs"))};
+    const sc = getSidecar();
+    await sc.ask({ state: "x", current_model: "claude-sonnet-5-5", context_tokens: 1, models: [{ id: "claude-sonnet-5-5", tier: "sonnet" }] }, { deadline: 300 }).catch(() => {});
+    process.stdout.write("ended " + Date.now() + "\\n");
+    sc.child.kill("SIGKILL");
+    sc.child.stdin.destroy(); sc.child.stdout.destroy(); sc.child.stderr.destroy();
+  `;
+  setMode("silent");
+  const child = spawn(process.execPath, ["--input-type=module", "-e", script], {
+    env: { PATH: process.env.PATH, HOME: dir, LAYA_PYTHON: wrapper, FAKE_SIDECAR_MODE: modeFile },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  t.after(() => child.kill("SIGKILL"));
+  let out = "";
+  child.stdout.on("data", (c) => (out += c));
+  const [code] = await once(child, "exit");
+  const exitedAt = Date.now();
+  const endedAt = Number(/ended (\d+)/.exec(out)?.[1]);
+  assert.ok(endedAt, "the ask ended by its deadline");
+  assert.equal(code, 0);
+  assert.ok(exitedAt - endedAt < 1500, `it exited ${exitedAt - endedAt} ms after its work was done, not after the 5 s echo window`);
+});
+
 // ---------------------------------------------------------------- what the sidecar says about itself
 //
 // Lines with an "event" in them are not answers: they are the bridge telling the router how its model is

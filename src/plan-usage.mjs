@@ -222,6 +222,28 @@ export function createPollNotes() {
   };
 }
 
+/**
+ * The two handlers the poll loop is given: what to do with a reading, and with a probe that threw.
+ * Both write what the probe found through `createPollNotes`, so the log gets a line per change; the
+ * reading is then handed on to `ingest`. A reading's own failure to be ingested lands in the error
+ * handler, because the loop treats anything a handler throws as a failed check, and it is written
+ * down as one.
+ */
+export function planPollHandlers({ ingest, log }) {
+  const note = createPollNotes();
+  const say = (state, detail) => {
+    const line = note(state, detail);
+    if (line) log(line);
+  };
+  return {
+    onReading: (reading) => {
+      say(reading?.state);
+      ingest(reading);
+    },
+    onError: (err) => say("error", err?.message ?? String(err)),
+  };
+}
+
 // ---------------------------------------------------------------- how often
 
 /**

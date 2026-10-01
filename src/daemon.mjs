@@ -21,7 +21,7 @@ import { defaultEnvFiles, loadEnvFiles } from "./envfile.mjs";
 import { homedir } from "node:os";
 import { log } from "./log.mjs";
 import { fixedInterval, watchAccount } from "./account.mjs";
-import { createPollNotes, foldPlanReading, planTickMs, watchPlanUsage } from "./plan-usage.mjs";
+import { foldPlanReading, planPollHandlers, planTickMs, watchPlanUsage } from "./plan-usage.mjs";
 
 // The same settings files the command-line launcher reads. Without this, LAYA_PYTHON kept in
 // ~/.laya-router.env (where setup records it) never reached the login-item daemon.
@@ -588,17 +588,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   // the probe would answer with a session summary and no limits, and spawn a process for nothing.
   const planEvery = planTickMs(process.env.LAYA_PLAN_TICK_MS); // null: switched off
   if (planEvery !== null) {
-    const note = createPollNotes();
-    const say = (state, detail) => {
-      const line = note(state, detail);
-      if (line) log(line);
-    };
     watchPlanUsage({
-      onReading: (reading) => {
-        say(reading?.state);
-        controller.ingestPlanUsage(reading);
-      },
-      onError: (err) => say("error", err?.message ?? String(err)),
+      ...planPollHandlers({ ingest: (reading) => controller.ingestPlanUsage(reading), log }),
       every: planEvery,
       enabled: () => controller.account.state === "signed-in",
     });

@@ -23,7 +23,7 @@ import {
   readPlanUsage,
   readUsageCache,
   usableWindows,
-  watchPlanUsage, createPollNotes,
+  watchPlanUsage, createPollNotes, planPollHandlers,
 } from "../src/plan-usage.mjs";
 
 const FAKE = new URL("./fixtures/fake-claude-usage.mjs", import.meta.url).pathname;
@@ -618,4 +618,94 @@ test("a state nobody planned for is still written down, shortened, and once", ()
   assert.equal(note("something-new"), null);
   assert.equal(note(undefined), "plan usage: undefined", "a reading with no state is a state too");
   assert.ok(note("z".repeat(200)).length <= "plan usage: ".length + 40);
+});
+
+
+// ---------------------------------------------------------------- what the loop is handed
+
+/** The handlers wired to a log and an ingest that both just record what they are given. */
+function handlers() {
+  const log = [];
+  const ingested = [];
+  const h = planPollHandlers({ ingest: (r) => ingested.push(r), log: (line) => log.push(line) });
+  return { ...h, log, ingested };
+}
+
+test("a reading is written down by what it found, and then handed on whole", () => {
+  const h = handlers();
+  const reading = { state: "ok", windows: { "5h": { utilization: 0.4 } } };
+  h.onReading(reading);
+  assert.deepEqual(h.log, ["plan usage: reading ok"]);
+  assert.deepEqual(h.ingested, [reading], "the very object, so nothing is lost on the way");
+});
+
+test("the same result again is handed on every time but written down once", () => {
+  const h = handlers();
+  for (let i = 0; i < 5; i++) h.onReading({ state: "stale" });
+  assert.equal(h.log.length, 1, "one line for five identical probes");
+  assert.equal(h.ingested.length, 5, "and every reading still reached the ingest");
+});
+
+test("a probe that threw is written down with its reason, once, and hands nothing on", () => {
+  const h = handlers();
+  h.onError(new Error("spawn E2BIG"));
+  h.onError(new Error("spawn E2BIG"));
+  assert.deepEqual(h.log, ["plan usage: the check failed: spawn E2BIG"]);
+  assert.deepEqual(h.ingested, [], "an error is not a reading");
+});
+
+test("something thrown that is not an Error is still written down", () => {
+  const h = handlers();
+  h.onError("a bare string");
+  h.onError(undefined);
+  assert.deepEqual(h.log, ["plan usage: the check failed: a bare string", "plan usage: the check failed: undefined"]);
+});
+
+test("a reading with no state is written down as one, and still handed on", () => {
+  const h = handlers();
+  h.onReading(undefined);
+  assert.deepEqual(h.log, ["plan usage: undefined"]);
+  assert.deepEqual(h.ingested, [undefined]);
+});
+
+test("the log line is written before the reading is ingested, so a failing ingest cannot lose it", () => {
+  const log = [];
+  const h = planPollHandlers({ ingest: () => { throw new Error("ingest broke"); }, log: (l) => log.push(l) });
+  assert.throws(() => h.onReading({ state: "ok" }), /ingest broke/, "the loop sees the throw, as it should, and reports it");
+  assert.deepEqual(log, ["plan usage: reading ok"], "but what the probe found was written first");
+});
+
+test("the loop given these handlers writes a failed ingest down as a failed check", async () => {
+  const log = [];
+  const h = planPollHandlers({ ingest: () => { throw new Error("ingest broke"); }, log: (l) => log.push(l) });
+  let stop;
+  await new Promise((done) => {
+    stop = watchPlanUsage({
+      read: async () => ({ state: "ok", windows: {} }),
+      onReading: h.onReading,
+      onError: (err) => { h.onError(err); done(); },
+      every: 600000,
+    });
+  });
+  stop();
+  assert.deepEqual(log, ["plan usage: reading ok", "plan usage: the check failed: ingest broke"]);
+});
+
+test("a probe that throws for real is written down: a process whose environment is too big to start", async () => {
+  // Measured: execFile throws E2BIG synchronously for an environment this large, rather than reporting
+  // it through its callback, so readPlanUsage rejects and the loop's error handler is the only witness.
+  const log = [];
+  const h = planPollHandlers({ ingest: () => {}, log: (l) => log.push(l) });
+  let stop;
+  await new Promise((done) => {
+    stop = watchPlanUsage({
+      read: () => readPlanUsage({ bin: "/usr/bin/true", env: { ...process.env, HUGE: "x".repeat(2_000_000) } }),
+      onReading: h.onReading,
+      onError: (err) => { h.onError(err); done(); },
+      every: 600000,
+    });
+  });
+  stop();
+  assert.equal(log.length, 1);
+  assert.match(log[0], /^plan usage: the check failed: spawn E2BIG/);
 });
