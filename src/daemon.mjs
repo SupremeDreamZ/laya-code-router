@@ -22,6 +22,7 @@ import { homedir } from "node:os";
 import { log } from "./log.mjs";
 import { fixedInterval, watchAccount } from "./account.mjs";
 import { foldPlanReading, planPollHandlers, planTickMs, watchPlanUsage } from "./plan-usage.mjs";
+import { isMain } from "./is-main.mjs";
 
 // The same settings files the command-line launcher reads. Without this, LAYA_PYTHON kept in
 // ~/.laya-router.env (where setup records it) never reached the login-item daemon.
@@ -548,7 +549,7 @@ const processExists = (pid) => {
   }
 };
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMain(import.meta.url)) {
   const already = runningInfo();
   if (already && already.pid !== process.pid) {
     process.stderr.write(`[laya] a daemon is already running (pid ${already.pid})\n`);

@@ -8,7 +8,7 @@ import { execFile } from "node:child_process";
 import { accessSync, constants, readdirSync, statSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { isMain } from "./is-main.mjs";
 
 const SYSTEM_DIRS = ["/opt/homebrew/bin", "/usr/local/bin"];
 
@@ -183,7 +183,7 @@ export function describeAccount({ state, method } = {}) {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isMain(import.meta.url)) {
   const account = await readAccount();
   if (process.argv.includes("--hint")) {
     const { line, next } = describeAccount(account);
