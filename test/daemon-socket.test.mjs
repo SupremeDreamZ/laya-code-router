@@ -1,6 +1,7 @@
 // The control socket must survive anything a client does, including vanishing mid-write. The
 // menu-bar app connects on launch and disconnects when it quits; a crash there must not take the
 // router down with it, because the sidecar holds a 1.3GB model and an 85s cold start.
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import assert from "node:assert/strict";
 import net from "node:net";
@@ -10,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { freePort, wait, waitFor } from "./helpers.mjs";
 
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fileURLToPath(new URL("..", import.meta.url));
 const DAEMON = join(REPO, "src", "daemon.mjs");
 
 

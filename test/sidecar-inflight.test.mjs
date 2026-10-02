@@ -6,6 +6,7 @@
 // the cases that decide it: a model that was idle, one that is slow but working, one that is failing
 // slowly, one that is frozen. Each of those looks the same from the outside (a prompt that missed its
 // deadline) and only the history tells them apart.
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { once } from "node:events";
@@ -16,7 +17,7 @@ import { join } from "node:path";
 import { wait, waitFor } from "./helpers.mjs";
 import { THRESHOLDS } from "../src/config.mjs";
 
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fileURLToPath(new URL("..", import.meta.url));
 const home = mkdtempSync(join(tmpdir(), "laya-inflight-"));
 const modeFile = join(home, "mode");
 const startLog = join(home, "starts.log");

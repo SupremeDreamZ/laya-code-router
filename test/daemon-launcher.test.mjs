@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -8,7 +9,7 @@ import { join } from "node:path";
 // bin/laya-daemon is what launchd runs. It has to find a Python that has `laya` installed, and on
 // a stranger's Mac that is whatever setup.sh built, which is recorded in ~/.laya-router.env.
 // Driven with a stand-in for node that prints what it was handed, so nothing real is started.
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fileURLToPath(new URL("..", import.meta.url));
 const SCRIPT = join(REPO, "bin", "laya-daemon");
 
 function world() {

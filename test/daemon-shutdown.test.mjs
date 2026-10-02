@@ -5,6 +5,7 @@
 // running any exit handler, which lost up to two seconds of the day's savings ledger, a second of
 // the plan's limit readings, and left the routing model, which can be mid-way through a
 // minute-long load and not reading its input, running with nobody to answer to.
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
@@ -14,7 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { callDaemon, freePort, waitFor } from "./helpers.mjs";
 
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fileURLToPath(new URL("..", import.meta.url));
 const DAEMON = join(REPO, "src", "daemon.mjs");
 const FAKE = join(REPO, "test", "fixtures", "fake-sidecar.mjs");
 

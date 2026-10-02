@@ -8,6 +8,7 @@
 //   STUB_LOAD_S     how long Router() takes to construct
 //   STUB_FAIL_FILE  while this file exists, Router() raises, as a missing checkpoint does
 //   STUB_LOG        file that gets one line per Router() construction
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
@@ -15,7 +16,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const BRIDGE = new URL("../src/laya_bridge.py", import.meta.url).pathname;
+const BRIDGE = fileURLToPath(new URL("../src/laya_bridge.py", import.meta.url));
 const PYTHON = process.env.LAYA_TEST_PYTHON ?? "python3";
 const HAVE_PYTHON = spawnSync(PYTHON, ["-c", "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)"]).status === 0;
 const opts = { skip: HAVE_PYTHON ? false : "no python3 on this machine" };

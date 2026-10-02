@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
@@ -11,7 +12,7 @@ import { freePort, wait, waitFor } from "./helpers.mjs";
 // The whole chain, for real: a daemon process, its proxy, a stand-in for Anthropic that answers
 // with the plan's limit headers, and the control socket the app reads. A figure that goes in as a
 // response header must come out as a number in the snapshot and, past a threshold, an alert.
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fileURLToPath(new URL("..", import.meta.url));
 const DAEMON = join(REPO, "src", "daemon.mjs");
 
 

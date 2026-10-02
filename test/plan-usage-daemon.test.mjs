@@ -6,6 +6,7 @@
 // while the account sat at 26%. The daemon now also asks Claude Code, on a timer, once someone is
 // signed in. These tests run a real daemon against a stand-in Claude Code that behaves as the real
 // one was measured to (test/fixtures/fake-claude-usage.mjs), and send no turn unless the test says so.
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
@@ -15,7 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { callDaemon, freePort, wait, waitFor } from "./helpers.mjs";
 
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fileURLToPath(new URL("..", import.meta.url));
 const DAEMON = join(REPO, "src", "daemon.mjs");
 const FAKE = join(REPO, "test", "fixtures", "fake-claude-usage.mjs");
 

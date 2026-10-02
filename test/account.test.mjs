@@ -4,6 +4,7 @@
 // status` is also chatty (it prints the account's email, organisation and config path), none of
 // which belongs in a snapshot that any local subscriber receives, so what comes out of here is
 // checked against a whitelist and the tests scan for the personal fields by name.
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -13,7 +14,7 @@ import { delimiter, isAbsolute, join } from "node:path";
 import { claudeCandidates, describeAccount, exitCodeFor, findClaude, fixedInterval, nextCheckMs, readAccount, watchAccount } from "../src/account.mjs";
 import { waitFor } from "./helpers.mjs";
 
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fileURLToPath(new URL("..", import.meta.url));
 const SYSTEM_PATH = "/usr/bin:/bin";
 
 // What `claude auth status` really prints (field names from a live run), with invented values.

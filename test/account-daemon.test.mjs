@@ -5,6 +5,7 @@
 // Claude Code's: the app opens `claude auth login` in the person's terminal, where the browser
 // hand-off and any code to paste back are visible. The daemon only reports the state. It starts
 // no login, holds no credential, and exposes nothing that could.
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
@@ -14,7 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { callDaemon, freePort, subscribe, wait, waitFor } from "./helpers.mjs";
 
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fileURLToPath(new URL("..", import.meta.url));
 const DAEMON = join(REPO, "src", "daemon.mjs");
 const FAKE_CLAUDE = join(REPO, "test", "fixtures", "fake-claude");
 const PERSONAL = ["someone@example.com", "org-0000-invented", "Invented Studio", "/Users/someone", "max"];

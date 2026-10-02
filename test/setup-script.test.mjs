@@ -3,6 +3,7 @@
 // service, and each test reads back what was *called*, which is the only thing a stand-in can prove.
 // What the real launchctl does with the same sequence is checked separately, against a real
 // throwaway job, in the "real launchctl" test at the end.
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -10,7 +11,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileS
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fileURLToPath(new URL("..", import.meta.url));
 const SETUP = join(REPO, "setup.sh");
 const START = join(REPO, "apps", "LayaBar", "start.sh");
 const LABEL = "io.github.supremedreamz.laya";

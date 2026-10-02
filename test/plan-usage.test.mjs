@@ -8,6 +8,7 @@
 // are tested hardest: a cache served because Claude Code was offline (a stale figure shown as
 // current), and a status carried over from a window that has since ended (a limit alert that is
 // no longer true).
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -26,7 +27,7 @@ import {
   watchPlanUsage, createPollNotes, planPollHandlers,
 } from "../src/plan-usage.mjs";
 
-const FAKE = new URL("./fixtures/fake-claude-usage.mjs", import.meta.url).pathname;
+const FAKE = fileURLToPath(new URL("./fixtures/fake-claude-usage.mjs", import.meta.url));
 const tmp = (name) => mkdtempSync(join(tmpdir(), `laya-plan-${name}-`));
 const settle = () => new Promise((r) => setImmediate(r));
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));

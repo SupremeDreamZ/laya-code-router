@@ -4,7 +4,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import net from "node:net";
 import { isMain } from "../src/is-main.mjs";
 import { freePort, wait, waitFor } from "./helpers.mjs";
@@ -12,7 +12,7 @@ import { freePort, wait, waitFor } from "./helpers.mjs";
 // Both the daemon and `account.mjs` are a library and a command at once, and decide which they are by
 // asking this. It was a plain string comparison, so any path that was not already canonical made them
 // do nothing and say nothing. These run the real files from the awkward places a person's machine has.
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fileURLToPath(new URL("..", import.meta.url));
 
 const area = mkdtempSync(join(tmpdir(), "laya-ismain-"));
 const real = realpathSync(area);

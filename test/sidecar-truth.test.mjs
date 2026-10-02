@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
@@ -12,7 +13,7 @@ import { freePort, subscribe, wait, waitFor } from "./helpers.mjs";
 // as any event arrived, even a turn the user pinned (no routing decision) and even straight after a
 // routing failure. A real daemon runs here against a stand-in sidecar (test/fixtures/fake-sidecar.mjs)
 // whose behaviour each test changes, and the assertions are on what the daemon tells the app.
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fileURLToPath(new URL("..", import.meta.url));
 const DAEMON = join(REPO, "src", "daemon.mjs");
 const FAKE = join(REPO, "test", "fixtures", "fake-sidecar.mjs");
 

@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import assert from "node:assert/strict";
 import net from "node:net";
@@ -8,7 +9,7 @@ import { join } from "node:path";
 
 // `laya-claude` should join the background app's proxy. Run for real, against a stand-in for
 // Claude Code that reports what it was launched with, and a fake daemon speaking the wire format.
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fileURLToPath(new URL("..", import.meta.url));
 const LAUNCHER = join(REPO, "bin", "laya-claude.mjs");
 
 function fakeDaemon(proxyPort) {
