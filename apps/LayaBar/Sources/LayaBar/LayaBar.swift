@@ -130,6 +130,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func makePanel() -> NSPanel {
+        let panel = PanelShell.make()
+        panel.contentView = NSHostingView(rootView: RootView(client: client, notify: notifier.status, recheck: { [weak self] in
+            Task { await self?.notifier.refreshAccess() }
+        }))
+        return panel
+    }
+}
+
+/// The window around the panel's content: borderless, floating at the status-bar level, dark whatever the Mac is set to.
+enum PanelShell {
+    static func make() -> NSPanel {
         let panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 340, height: 520),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -137,8 +148,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             defer: false
         )
         panel.isMovableByWindowBackground = false
-        // Rounded to match the content, since there is no window chrome left to square it off.
-        panel.contentView?.wantsLayer = true
         panel.hidesOnDeactivate = false
         panel.backgroundColor = .clear
         panel.isOpaque = false
@@ -146,11 +155,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.level = .statusBar
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         panel.isReleasedWhenClosed = false
-        panel.contentView = NSHostingView(rootView: RootView(client: client, notify: notifier.status, recheck: { [weak self] in
-            Task { await self?.notifier.refreshAccess() }
-        }))
+        panel.appearance = PanelAppearance.forced
         return panel
     }
+}
+
+/// The panel's palette is dark-only (see `Theme`), so the system controls inside it must be dark too.
+/// Left to follow the Mac, a light-mode Mac drew the header icons and the eagerness picker in dark
+/// ink on the dark panel, so they could not be seen (found 2026-10-01 by capturing the panel in light mode).
+enum PanelAppearance {
+    static var forced: NSAppearance? { NSAppearance(named: .darkAqua) }
 }
 
 /// The panel. Sections, top to bottom, in the order a person asks for them:
