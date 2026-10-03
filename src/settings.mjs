@@ -21,6 +21,19 @@ export function routerEnv(existing = process.env) {
 }
 
 /**
+ * LAYA_STEP_ROUTING=1 as a request header (x-laya-step-routing, read and stripped by the proxy).
+ * A session that joins the app's shared proxy does not share its environment, so the switch has to
+ * travel with the requests. Claude Code sends ANTHROPIC_CUSTOM_HEADERS on every API request; any
+ * the user already set are kept. Only this session is affected, never the app's setting.
+ */
+export function stepRoutingEnv(existing = process.env) {
+  if (existing.LAYA_STEP_ROUTING !== "1") return {};
+  const header = "x-laya-step-routing: 1";
+  const own = existing.ANTHROPIC_CUSTOM_HEADERS;
+  return { ANTHROPIC_CUSTOM_HEADERS: own ? `${own}\n${header}` : header };
+}
+
+/**
  * Settings the launcher passes with `--settings`. That flag layers over the user's own
  * settings.json, while the process environment does NOT: a user-level `env` block beats it.
  * Measured with claude 2.1.285 and ANTHROPIC_BASE_URL in ~/.claude/settings.json (the gateway

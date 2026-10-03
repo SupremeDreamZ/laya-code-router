@@ -11,10 +11,12 @@ import {
   isAuto,
   shouldUseExactModel,
   EFFORT,
+  THRESHOLDS,
+  STEP_FRAMING,
 } from "./config.mjs";
 import { askLaya } from "./router.mjs";
-import { decide, effortFor, settleEffort } from "./policy.mjs";
-import { requestClass, adaptForModel, filterBetas } from "./wire.mjs";
+import { decide, decideStep, effortFor, settleEffort } from "./policy.mjs";
+import { requestClass, adaptForModel, filterBetas, stepHazard } from "./wire.mjs";
 import { log } from "./log.mjs";
 import { createUsageTap, decoderFor, readableEncodings } from "./usage.mjs";
 import { parseLimitHeaders } from "./limits.mjs";
@@ -88,6 +90,73 @@ export function newTurnPrompt(body) {
   const prompt = text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "").trim();
   if (!prompt || SYNTHETIC_TURN.test(prompt)) return null;
   return prompt;
+}
+
+const conversationalOf = (body) => (Array.isArray(body?.messages) ? body.messages : []).filter((m) => m?.role !== "system");
+const blocksOf = (content) => (typeof content === "string" ? [{ type: "text", text: content }] : Array.isArray(content) ? content : []);
+const charsOf = (value) => (typeof value === "string" ? value.length : JSON.stringify(value ?? "").length);
+
+/** Whether this request continues a tool loop: the last message hands back tool results. */
+export function isToolContinuation(body) {
+  const last = conversationalOf(body).at(-1);
+  return last?.role === "user" && blocksOf(last.content).some((b) => b?.type === "tool_result");
+}
+
+/** One tool call as LAYA sees it: its name and the first part of each argument. */
+function describeToolUse(block) {
+  const input = block.input && typeof block.input === "object" ? block.input : {};
+  const args = Object.entries(input)
+    .map(([k, v]) => `${k}=${(typeof v === "string" ? v : JSON.stringify(v)).replace(/\s+/g, " ").slice(0, 120)}`)
+    .join(", ");
+  return `${block.name ?? "tool"}: ${args}`.slice(0, 300);
+}
+
+/**
+ * What LAYA is asked at a step: the assistant's own intent, read from its latest message. Its text
+ * and its tool calls (name and a short form of the arguments) say what it is about to do. Its
+ * thinking is never sent (it is the model's private reasoning, and is often empty on the wire) and
+ * neither is tool output, which describes the files, not the work. Null when there is nothing to
+ * read, which skips the check.
+ */
+export function stepPrompt(body, maxChars = THRESHOLDS.stepPromptChars) {
+  const assistant = conversationalOf(body).findLast((m) => m?.role === "assistant");
+  if (!assistant) return null;
+  const parts = [];
+  for (const b of blocksOf(assistant.content)) {
+    if (b?.type === "text" && typeof b.text === "string") {
+      const text = b.text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "").trim();
+      if (text) parts.push(text);
+    } else if (b?.type === "tool_use") {
+      parts.push(describeToolUse(b));
+    }
+  }
+  if (!parts.length) return null;
+  return `${STEP_FRAMING}\n${parts.join("\n")}`.slice(0, maxChars);
+}
+
+/**
+ * The average step of this conversation so far, in tokens (4 characters each, as elsewhere here):
+ * `output` is what each assistant message wrote, `input` what each tool result brought back. It is
+ * what a switch's saving is priced on.
+ */
+export function stepSize(body) {
+  let output = 0;
+  let input = 0;
+  let steps = 0;
+  for (const m of conversationalOf(body)) {
+    const blocks = blocksOf(m.content);
+    if (m.role === "assistant") {
+      steps++;
+      for (const b of blocks) {
+        if (b?.type === "text") output += charsOf(b.text);
+        else if (b?.type === "tool_use") output += charsOf(b.input) + charsOf(b.name);
+      }
+    } else {
+      for (const b of blocks) if (b?.type === "tool_result") input += charsOf(b.content);
+    }
+  }
+  if (!steps) return { input: 0, output: 0 };
+  return { input: Math.round(input / 4 / steps), output: Math.round(output / 4 / steps) };
 }
 
 /**
@@ -233,6 +302,17 @@ export function observeModel(state, current) {
  * running; without one the proxy behaves exactly as it did on its own, which is what the
  * command-line launcher relies on.
  */
+/**
+ * Header `laya-claude` asks Claude Code to send (ANTHROPIC_CUSTOM_HEADERS) when it was started with
+ * LAYA_STEP_ROUTING=1. A worker that joins the app's shared proxy does not share its environment,
+ * so the switch has to travel with the requests. Stripped before anything goes upstream.
+ */
+export const STEP_HEADER = "x-laya-step-routing";
+
+/** Whether step routing is on for this request: the app's setting, the environment, or the header. */
+const stepsOn = (prefs, headers) =>
+  prefs?.stepRouting === true || process.env.LAYA_STEP_ROUTING === "1" || headers?.[STEP_HEADER] === "1";
+
 let prefsCache = { mtimeMs: 0, value: null };
 function readPrefs() {
   if (process.env.LAYA_DISABLE_PREFS === "1") return null;
@@ -258,6 +338,7 @@ export async function startProxy({
   onEvent = null,
   onLimits = null,
   port: wantedPort = 0,
+  stepDeadlineMs = THRESHOLDS.stepDeadlineMs,
 } = {}) {
   // Tier routed for each conversation's turn in flight, reused by its follow-up requests and
   // by the cache-rebuild guard, which needs to know what the prompt cache was built on.
@@ -280,6 +361,23 @@ export async function startProxy({
     if (!parents.has(session) && parents.size > 50) parents.delete(parents.keys().next().value);
     parents.set(session, { tier, model });
   };
+  /**
+   * The models a decision chooses between. Only a gateway needs its missing tiers filled in: the
+   * static tier ids are that gateway's slugs, and against first-party Anthropic they are the wrong
+   * format. The fill decides which tiers exist and what each resolves to; the options LAYA is
+   * asked to choose between stay the account's real models. A tier switched off in the app is not
+   * offered at all, so a decision can never land on it and the substitute steps up instead.
+   */
+  const choicesFor = (prefs) => {
+    const inTier = (model) => availableTiers(prefs?.tiers).includes(model.tier);
+    const catalogModels = claudeModels([...catalog.values()]).filter(inTier);
+    const models = claudeModels([...catalog.values()], {
+      fillMissingTiers: upstreamURL !== ANTHROPIC_BASE_URL,
+    }).filter(inTier);
+    const available = [...new Set(models.map((model) => model.tier))];
+    const allowed = prefs?.tiers ? available.filter((t) => prefs.tiers[t] === true) : available;
+    return { catalogModels, models, allowed: allowed.length ? allowed : available };
+  };
 
   const server = http.createServer((req, res) => {
     // Claude Code probes the base URL before its first request.
@@ -293,6 +391,8 @@ export async function startProxy({
       // What this request is, for the app's live feed: a tap on the response reads the token
       // usage the API itself reports, and the rest is the decision already made above.
       let report = null;
+      // The routed conversation this request belongs to, so its response's usage can be kept.
+      let convo = null;
       const emit = (event) => {
         if (!onEvent) return;
         try {
@@ -333,6 +433,7 @@ export async function startProxy({
           } else {
             const key = conversationKey(body);
             const state = stateFor(key);
+            convo = state;
             const session = sessionOf(body) || String(req.headers["x-claude-code-session-id"] ?? "");
             // Claude Code labels each request when CLAUDE_CODE_GATEWAY_HINT_HEADERS=1. A "main"
             // request can be a message the user wrote, and a sub-agent's opening request is the
@@ -352,6 +453,7 @@ export async function startProxy({
             let fresh = null;
             let laya = null;
             let reason = null;
+            let step = null;
             // `tier`/`model` are the pair this request is served by: the forced one for
             // background or paused work, otherwise the decision. Declared once here so the
             // routing branch and the rewrite below cannot disagree.
@@ -381,16 +483,7 @@ export async function startProxy({
               debug(`${key} routing paused, serving ${paused}`);
               if (onEvent) report = { kind: "paused", tier: prefs.pausedTier, reason: "routing is off", session: sessionOf(body) };
             } else if (prompt && !explaining) {
-              // Only a gateway needs its missing tiers filled in: the static tier ids are that
-              // gateway's slugs. Against first-party Anthropic they are the wrong format.
-              // The fill decides which tiers exist and what each resolves to; the options
-              // LAYA is asked to choose between stay the account's real models.
-              const inTier = (model) => availableTiers(prefs?.tiers).includes(model.tier);
-              const catalogModels = claudeModels([...catalog.values()]).filter(inTier);
-              const models = claudeModels([...catalog.values()], {
-                fillMissingTiers: upstreamURL !== ANTHROPIC_BASE_URL,
-              }).filter(inTier);
-              const available = [...new Set(models.map((model) => model.tier))];
+              const { catalogModels, models, allowed } = choicesFor(prefs);
               const currentModel = state.model ?? parent?.model ?? modelForTier(models, current);
               const contextTokens = Math.round(JSON.stringify(body.messages).length / 4);
               laya = await ask(route, { prompt, current: currentModel, contextTokens, models: catalogModels });
@@ -398,20 +491,19 @@ export async function startProxy({
               // just compacted may move either way; otherwise the tier only goes up.
               const idleMs = Date.now() - (state.lastSeen ?? 0);
               const freshSession = state.tier === null || idleMs > IDLE_RESET_MS || state.freshNext === true;
-              // A tier switched off in the app is not offered to the router at all, so a
-              // decision can never land on it and the substitute steps up instead.
-              const allowed = prefs?.tiers
-                ? available.filter((t) => prefs.tiers[t] === true)
-                : available;
               ({ tier, reason } = decide({
                 prompt,
                 laya,
                 current,
-                available: allowed.length ? allowed : available,
+                available: allowed,
                 contextTokens,
                 fresh: freshSession,
               }));
               state.freshNext = false;
+              // A new turn starts its own count of tool-loop steps, and a tier the user named for
+              // it holds for the whole turn: step routing does not move it.
+              state.continuations = state.stepAskedAt = 0;
+              state.pinned = /^override\b/.test(reason ?? "");
               // The N-way pick is explanation-only for policy, but when the rubric decision
               // was accepted and the pick landed in the same tier, its exact model carries
               // LAYA's version preference within that tier.
@@ -449,6 +541,59 @@ export async function startProxy({
                 `${key} ${laya && laya.confidence != null ? `${laya.ms}ms p=${laya.confidence.toFixed(2)}` : "no-laya"} ` +
                   `${current} -> ${tier} (${reason}) ctx~${contextTokens} | ${prompt.slice(0, 60)}`,
               );
+            } else if (stepsOn(prefs, req.headers) && humanTurn && state.tier && !state.pinned && isToolContinuation(body)) {
+              // A step: the conversation is inside a tool loop on a tier it already has. Asked at
+              // most every `stepEvery` continuations, never twice in a row, and only when the
+              // assistant's last message says what it is doing.
+              state.continuations = (state.continuations ?? 0) + 1;
+              const due = state.continuations - (state.stepAskedAt ?? 0) >= Math.max(2, THRESHOLDS.stepEvery);
+              const stepText = due ? stepPrompt(body) : null;
+              if (stepText) {
+                state.stepAskedAt = state.continuations;
+                const { catalogModels, models, allowed } = choicesFor(prefs);
+                const currentModel = state.model ?? modelForTier(models, current);
+                // The cache a switch throws away is the whole prefix, system prompt and tools
+                // included, which the messages alone understate (measured: 6,758 estimated against
+                // 20,093 cached). The size the API reported for the last response is the real one.
+                const contextTokens = Math.max(Math.round(JSON.stringify(body.messages).length / 4), state.prefixTokens ?? 0);
+                laya = await ask(route, { prompt: stepText, current: currentModel, contextTokens, models: catalogModels }, stepDeadlineMs);
+                const size = stepSize(body);
+                const d = decideStep({
+                  prompt: stepText,
+                  laya,
+                  current,
+                  available: allowed,
+                  contextTokens,
+                  step: size,
+                  hazard: (target) => stepHazard(body, modelForTier(models, target)),
+                });
+                reason = d.reason;
+                if (d.switched) {
+                  state.tier = d.tier;
+                  state.model = modelForTier(models, d.tier);
+                  // A switch starts cold anyway, so the new tier's own effort costs nothing extra.
+                  state.effort = prefs?.effortAuto === false
+                    ? undefined
+                    : settleEffort({ target: effortFor(d.tier, laya?.metrics), previous: state.effort ?? null, fresh: false, tierChanged: true });
+                  if (!subagent) recordParent(session, state.tier, state.model);
+                }
+                step = {
+                  of: subagent ? "subagent" : "main",
+                  from: current,
+                  to: state.tier,
+                  switched: d.switched,
+                  target: d.target ?? null,
+                  saving: d.saving,
+                  rebuild: d.rebuild,
+                  contextTokens,
+                  stepTokens: size,
+                  prompt: stepText,
+                };
+                debug(
+                  `${key} step ${state.continuations} ${laya && laya.confidence != null ? `${laya.ms}ms p=${laya.confidence.toFixed(2)}` : "no-laya"} ` +
+                    `${current} -> ${state.tier} (${reason}) save~$${d.saving.toFixed(4)} rebuild~$${d.rebuild.toFixed(4)} ctx~${contextTokens}`,
+                );
+              }
             }
             // The sentinel is not a real model, so every routed request must be rewritten,
             // including follow-ups that reuse the tier chosen for the turn.
@@ -473,7 +618,8 @@ export async function startProxy({
             if (onEvent) {
               report = {
                 ...(report ?? { kind: "routed" }),
-                class: cls === "auxiliary" ? "auxiliary" : subagent ? "subagent" : "main",
+                class: step ? "step" : cls === "auxiliary" ? "auxiliary" : subagent ? "subagent" : "main",
+                ...(step ? { step } : {}),
                 tier,
                 model,
                 effort: body.output_config?.effort ?? null,
@@ -506,6 +652,8 @@ export async function startProxy({
       const transport = target.protocol === "http:" ? http : https;
       const headers = { ...req.headers, host: target.host };
       delete headers["content-length"];
+      // The launcher's own switch, meant for this proxy only.
+      delete headers[STEP_HEADER];
       if (routedModel && headers["anthropic-beta"]) {
         headers["anthropic-beta"] = filterBetas(headers["anthropic-beta"], routedModel);
       }
@@ -606,7 +754,9 @@ export async function startProxy({
             const finish = (usage, model) => {
               if (reported) return;
               reported = true;
-              emit({ ...report, model: report.model ?? model ?? undefined, ...(usage ? { usage } : {}), kind: report.kind ?? "routed" });
+              if (usage && convo) convo.prefixTokens = (usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
+              // The status says whether the model this was routed to accepted the request at all.
+              emit({ ...report, model: report.model ?? model ?? undefined, status: up.statusCode, ...(usage ? { usage } : {}), kind: report.kind ?? "routed" });
             };
             const tap = createUsageTap(({ usage, model }) => finish(usage, model));
             const settle = () => {

@@ -112,6 +112,37 @@ function capOutput(body, limit) {
   return limit;
 }
 
+const THINKING_BLOCKS = new Set(["thinking", "redacted_thinking"]);
+
+/**
+ * Models that check the prefix under each thinking block they are sent back: a block stays valid
+ * only while everything before it is unchanged, and by default a changed one is a 400
+ * (platform.claude.com/docs/en/build-with-claude/preserved-thinking, checked 2026-10-03).
+ */
+const PREFIX_CHECKED = /^claude-(opus-5-5|sonnet-5-5|fable-5-1)\b/;
+
+/**
+ * Why a switch to `model` in the middle of a tool loop would break the request, or null when it
+ * would not. The docs say a switch is safe in itself: thinking blocks a model cannot read are
+ * dropped silently, never rejected, so they are passed back unchanged. Two shapes are not safe:
+ *  - an assistant message made only of thinking blocks, which would be left empty once its blocks
+ *    are dropped;
+ *  - a target that checks thinking prefixes and whose history the proxy rewrites (system-message
+ *    folding), which changes the prefix under every thinking block. No tier hits this today, since
+ *    every prefix-checking model takes system messages; it is checked so a table change cannot.
+ */
+export function stepHazard(body, model, { checksPrefix = (m) => PREFIX_CHECKED.test(String(m ?? "")), takesSystem = takesSystemMessages } = {}) {
+  const messages = Array.isArray(body?.messages) ? body.messages : [];
+  const thinking = (m) => Array.isArray(m?.content) && m.content.some((b) => THINKING_BLOCKS.has(b?.type));
+  if (messages.some((m) => m?.role === "assistant" && Array.isArray(m.content) && m.content.length > 0 && m.content.every((b) => THINKING_BLOCKS.has(b?.type)))) {
+    return "thinking-only-message";
+  }
+  if (checksPrefix(model) && !takesSystem(model) && messages.some((m) => m?.role === "system") && messages.some(thinking)) {
+    return "thinking-prefix-would-change";
+  }
+  return null;
+}
+
 /**
  * Makes a request Claude Code shaped for Opus acceptable to `model`. Mutates `body`.
  * Fields a tier cannot take at all (thinking, effort, context management) are the tier

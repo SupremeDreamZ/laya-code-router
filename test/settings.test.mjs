@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readSavedModel, restoreSavedModel, sessionSettings } from "../src/settings.mjs";
+import { readSavedModel, restoreSavedModel, sessionSettings, stepRoutingEnv } from "../src/settings.mjs";
 
 const fileWith = (settings) => {
   const file = join(mkdtempSync(join(tmpdir(), "laya-settings-")), "settings.json");
@@ -76,4 +76,16 @@ test("session settings carry the status line only when asked to", () => {
 // request would think harder and spend more than a plain `claude` session.
 test("session settings restore the documented default effort, which the sentinel model loses", () => {
   assert.equal(sessionSettings({ baseURL: "http://127.0.0.1:1" }).effortLevel, "medium");
+});
+
+// A headless worker usually joins the app's shared proxy, whose environment is not the worker's,
+// so LAYA_STEP_ROUTING=1 on the worker has to travel with its requests: the launcher asks Claude
+// Code to send a header, keeping any custom headers the user already has.
+test("LAYA_STEP_ROUTING=1 becomes a request header, added to the user's own custom headers", () => {
+  assert.deepEqual(stepRoutingEnv({}), {});
+  assert.deepEqual(stepRoutingEnv({ LAYA_STEP_ROUTING: "0" }), {});
+  assert.deepEqual(stepRoutingEnv({ LAYA_STEP_ROUTING: "1" }), { ANTHROPIC_CUSTOM_HEADERS: "x-laya-step-routing: 1" });
+  assert.deepEqual(stepRoutingEnv({ LAYA_STEP_ROUTING: "1", ANTHROPIC_CUSTOM_HEADERS: "x-team: blue" }), {
+    ANTHROPIC_CUSTOM_HEADERS: "x-team: blue\nx-laya-step-routing: 1",
+  });
 });

@@ -90,6 +90,31 @@ export const THRESHOLDS = {
    */
   downgradeMaxContextTokens: 20000,
   /**
+   * Step routing (off unless prefs.stepRouting, LAYA_STEP_ROUTING=1, or the launcher's
+   * x-laya-step-routing header): at a tool-loop continuation LAYA is asked again, about what the
+   * assistant is doing next. `stepEvery`: at most once per this many continuations of one
+   * conversation, and never on two requests in a row. Each check costs a sidecar call (200-500 ms
+   * measured) on the request it is made for, so it is not done on every tool call.
+   */
+  stepEvery: 4,
+  /**
+   * How many more steps a switch is assumed to serve when its saving is weighed against the cache
+   * rebuild it causes. A guess, not a measurement: a step event records both figures, so it can be
+   * checked against what the following steps actually cost.
+   */
+  stepHorizon: 6,
+  /**
+   * A step never moves down past this much context, whatever the arithmetic says: the rebuild is
+   * paid up front and the saving only if the loop runs on, and a long loop is the likeliest to be
+   * hard work that needs the stronger model. Twice the turn-level `downgradeMaxContextTokens`,
+   * because a step downgrade is checked against its cost and a turn downgrade is not.
+   */
+  stepMaxContextTokens: 40000,
+  /** The longest a step waits for LAYA. Past it the step stays where it is; the turn is not held. */
+  stepDeadlineMs: 3000,
+  /** Longest step prompt sent to LAYA. The rubric reads intent, and intent is in the first lines. */
+  stepPromptChars: 1500,
+  /**
    * LAYA sidecar thresholds. The sidecar loads its model as soon as it starts (6 to 10 s measured on
    * an M2 Max with the weights already on disk; a slower machine takes longer), so a prompt rarely
    * waits for a load, and one that does waits behind it.
@@ -127,6 +152,9 @@ export const THRESHOLDS = {
 };
 
 export const CONTEXT_WINDOW_TOKENS = 200000;
+
+/** First line of every step prompt, so LAYA scores the rest as a step of work already under way. */
+export const STEP_FRAMING = "Next step of an ongoing task:";
 
 /**
  * The three-level rubric the LAYA sidecar scores per fresh user turn. Kept here so the

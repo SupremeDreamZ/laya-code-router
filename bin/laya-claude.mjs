@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync, mkdirSync, accessSync, constants, openSync, readSync, closeSync } from "node:fs";
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync, accessSync, constants, openSync, readSync, closeSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,7 +8,7 @@ import { startProxy } from "../src/proxy.mjs";
 import { findDaemonProxy } from "../src/attach.mjs";
 import { warmSidecar } from "../src/router.mjs";
 import { AUTO_MODEL, routingEnabled } from "../src/config.mjs";
-import { readSavedModel, restoreSavedModel, sessionSettings, routerEnv } from "../src/settings.mjs";
+import { readSavedModel, restoreSavedModel, sessionSettings, routerEnv, stepRoutingEnv } from "../src/settings.mjs";
 import { LOG_FILE } from "../src/log.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -199,7 +199,19 @@ if (routingEnabled()) {
   // here. With no app (or LAYA_NO_DAEMON=1) this is null and the session runs its own proxy and
   // model exactly as it always did.
   const shared = await findDaemonProxy();
-  const proxy = shared ?? (await startProxy());
+  // A private proxy has no app to show its decisions. LAYA_EVENTS_FILE keeps them as JSON lines,
+  // the same events the app records, so a headless run's routing can be measured afterwards.
+  const eventsFile = process.env.LAYA_EVENTS_FILE;
+  const onEvent = eventsFile
+    ? (e) => {
+        try {
+          appendFileSync(eventsFile, `${JSON.stringify({ at: Date.now(), ...e })}\n`, { mode: 0o600 });
+        } catch {
+          // A lost line is not worth a session.
+        }
+      }
+    : null;
+  const proxy = shared ?? (await startProxy({ onEvent }));
   const { port } = proxy;
   // A joined proxy belongs to the app, not to this session: leaving must not shut it down.
   const close = shared ? () => {} : proxy.close;
@@ -210,6 +222,7 @@ if (routingEnabled()) {
   env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${port}`;
   env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = "1";
   Object.assign(env, routerEnv(process.env));
+  Object.assign(env, stepRoutingEnv(process.env));
   Object.assign(env, autoModelEnv());
   process.on("exit", () => {
     close();

@@ -20,6 +20,11 @@ export const DEFAULT_PREFS = Object.freeze({
   tiers: Object.freeze({ haiku: true, sonnet: true, opus: true, fable: false }),
   /** Let the router choose how hard the model thinks, not only which model. */
   effortAuto: true,
+  /**
+   * Re-ask the router in the middle of a tool loop, not only when you type. Off by default: each
+   * check costs a moment on the request it is made for, and a switch rebuilds the prompt cache.
+   */
+  stepRouting: false,
   /** What a session runs on while the router is off. */
   pausedTier: "opus",
   /** What the savings figure compares against. */
@@ -62,6 +67,7 @@ const SCHEMA = {
     return next.sonnet || next.opus ? next : undefined;
   },
   effortAuto: (v) => (isBool(v) ? v : undefined),
+  stepRouting: (v) => (isBool(v) ? v : undefined),
   pausedTier: (v) => (oneOf(["haiku", "sonnet", "opus", "fable"])(v) ? v : undefined),
   baselineTier: (v) => (oneOf(["sonnet", "opus", "fable"])(v) ? v : undefined),
   showPrompts: (v) => (isBool(v) ? v : undefined),

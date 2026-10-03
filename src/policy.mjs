@@ -1,4 +1,5 @@
 import { SCORE_TIER, EFFORT, DESIGN_WORK, TIER_NAMES, THRESHOLDS, OVERRIDE_PATTERNS, rankOf } from "./config.mjs";
+import { pricesFor } from "./pricing.mjs";
 
 /** Design-shaped wording (architecture, migration, from scratch); see DESIGN_WORK. */
 export function isDesignWork(prompt) {
@@ -107,6 +108,59 @@ export function decide({ prompt, laya, current, available, contextTokens = 0, fr
   }
 
   return settle(target, "laya");
+}
+
+/**
+ * What a step switch from `current` to `target` costs and saves, in list-price dollars.
+ *  - rebuild: the switch leaves the prompt cache behind, so the context is read once more at the
+ *    target's uncached input rate instead of its cached-read rate.
+ *  - saving: the price difference over the next `horizon` steps of the measured average size (new
+ *    input and output per step). Context re-reads on later steps are left out, so a downgrade's
+ *    saving is understated, never overstated. Negative for an upgrade.
+ */
+export function stepCost({ current, target, contextTokens, step, horizon = THRESHOLDS.stepHorizon }) {
+  const from = pricesFor(null, current);
+  const to = pricesFor(null, target);
+  if (!from || !to) return { rebuild: 0, saving: 0 };
+  const [fromIn, , , , fromOut] = from;
+  const [toIn, , , toRead, toOut] = to;
+  return {
+    rebuild: (contextTokens * (toIn - toRead)) / 1e6,
+    saving: (horizon * ((step?.input ?? 0) * (fromIn - toIn) + (step?.output ?? 0) * (fromOut - toOut))) / 1e6,
+  };
+}
+
+/**
+ * The step decision: whether a tool-loop continuation moves to another tier. Pure, and total like
+ * `decide`: any missing or uncertain input keeps the tier the loop is on.
+ *
+ * Unlike a turn, a step moves either way, because the work inside one turn changes (reading files,
+ * then designing a fix). An upgrade is about quality and only needs a confident answer. A
+ * downgrade throws away a warm cache to save money, so it also has to stay under
+ * `stepMaxContextTokens` and save more over the next steps than the rebuild costs. `hazard(tier)`
+ * names a reason the wire cannot carry the switch (see wire.stepHazard), which refuses it.
+ *
+ * @returns {{tier: string, switched: boolean, reason: string, target?: string, saving: number, rebuild: number}}
+ */
+export function decideStep({ prompt, laya, current, available, contextTokens = 0, step, hazard = () => null }) {
+  const none = { saving: 0, rebuild: 0 };
+  const stay = (reason, extra = none) => ({ tier: current, switched: false, reason, ...extra });
+  if (!laya) return stay("step-laya-unavailable");
+  let target = tierFromScores(laya.metrics);
+  if (!target) return stay("step-laya-unavailable");
+  if (target === "haiku" && isDesignWork(prompt)) target = "sonnet";
+  target = clampToAvailable(target, available) ?? current;
+  if (!(laya.confidence >= THRESHOLDS.minConfidence)) return stay("step-low-confidence", { target, ...none });
+  if (target === current) return stay("step-same-tier");
+  const cost = { target, ...stepCost({ current, target, contextTokens, step }) };
+  const up = rankOf(target) > rankOf(current);
+  if (!up) {
+    if (contextTokens > THRESHOLDS.stepMaxContextTokens) return stay("step-context-too-large", cost);
+    if (!(cost.saving > cost.rebuild)) return stay("step-not-worth-cache-rebuild", cost);
+  }
+  const why = hazard(target);
+  if (why) return stay(`step-refused-${why}`, cost);
+  return { tier: target, switched: true, reason: up ? "step-upgrade" : "step-downgrade", ...cost };
 }
 
 const EFFORT_ORDER = ["low", "medium", "high"];

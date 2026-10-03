@@ -272,7 +272,7 @@ function handle(action, arg) {
     case "engine.stop":
       return stopEngine(engineArg(arg));
     case "event": {
-      const { kind, tier, model, effort, reason, usage, prompt, ms, confidence, session, class: cls } = arg ?? {};
+      const { kind, tier, model, effort, reason, usage, prompt, ms, confidence, session, class: cls, step, status } = arg ?? {};
       const at = Date.now();
       const entry = {
         at,
@@ -287,6 +287,11 @@ function handle(action, arg) {
         confidence,
         prompt: controller.prefs.showPrompts ? prompt : undefined,
         session,
+        // A step check: from/to, whether it switched, and the saving and cache rebuild it weighed.
+        // What LAYA was asked is the assistant's own words, so it follows the prompt setting.
+        step: step ? { ...step, prompt: controller.prefs.showPrompts ? step.prompt : undefined } : undefined,
+        // The upstream HTTP status: a 400 here is a request the routed model refused.
+        status,
         // The token counts travel with the event, so the app can show them and the ledger can
         // price the turn without a second call into the proxy.
         usage: usage ?? null,
