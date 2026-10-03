@@ -1,4 +1,4 @@
-import { EFFORT, DESIGN_WORK, TIER_NAMES, THRESHOLDS, OVERRIDE_PATTERNS, rankOf, scoreTierFor } from "./config.mjs";
+import { EFFORT, EFFORT_LEVELS, DESIGN_WORK, TIER_NAMES, THRESHOLDS, OVERRIDE_PATTERNS, rankOf, scoreTierFor } from "./config.mjs";
 import { pricesFor } from "./pricing.mjs";
 
 /** Design-shaped wording (architecture, migration, from scratch); see DESIGN_WORK. */
@@ -182,31 +182,55 @@ export function decideStep({ prompt, laya, current, available, contextTokens = 0
   return { tier: target, switched: true, reason: paced ? "plan-pace-cap" : up ? "step-upgrade" : "step-downgrade", ...cost };
 }
 
-const EFFORT_ORDER = ["low", "medium", "high"];
+const mean3 = (m) => {
+  const parts = [m?.taskComplexity, m?.reasoningRequired, m?.toolComplexity].filter(Number.isFinite);
+  return parts.length ? parts.reduce((a, b) => a + b, 0) / parts.length : null;
+};
 
 /**
- * The effort level for a turn routed to `tier`, or null when the tier takes none (Haiku).
- * Without LAYA's judgment answer it stays at the documented default rather than guessing.
+ * The effort level for work routed to `tier`, and the reason, or `{level: null}` when the tier takes
+ * none (Haiku). Thresholds and the Anthropic guidance behind each are in config.mjs (EFFORT).
+ *
+ * @param {string} tier
+ * @param {?object} metrics   LAYA's rubric scores; null when LAYA gave no answer
+ * @param {string} [cls]      "subagent" for a sub-agent's own conversation, anything else is the main one
+ * @param {object} [signals]  `headless` (a -p run) and `briefChars` (length of the turn's prompt), the
+ *                            only things xhigh looks at beyond the scores
  */
-export function effortFor(tier, metrics) {
-  if (tier === "haiku") return null;
-  const parts = [metrics?.taskComplexity, metrics?.reasoningRequired, metrics?.toolComplexity].filter((v) =>
-    Number.isFinite(v),
-  );
-  const mean = parts.length ? parts.reduce((a, b) => a + b, 0) / parts.length : null;
+export function effortWhy(tier, metrics, cls = "main", signals = {}) {
+  const done = (level, reason) => ({ level, reason });
+  if (tier === "haiku") return done(null, "haiku-takes-none");
+  const mean = mean3(metrics);
   const judgment = Number.isFinite(metrics?.judgment) ? metrics.judgment : null;
+  const hard = mean !== null && mean >= EFFORT.opusHighMean;
+  const openEnded = judgment !== null && judgment >= EFFORT.opusHighJudgment;
+  if (cls === "subagent") {
+    if (mean === null && judgment === null) return done("medium", "subagent-unscored");
+    if (hard || openEnded) return done("high", "subagent-hard");
+    if ((mean !== null && mean >= EFFORT.subagentMediumMean) || (judgment !== null && judgment >= EFFORT.subagentMediumJudgment)) {
+      return done("medium", "subagent-medium");
+    }
+    return done("low", "subagent-default");
+  }
   if (tier === "sonnet") {
-    if (judgment === null) return "medium";
-    if (judgment >= EFFORT.sonnetHighJudgment) return "high";
-    if (judgment < EFFORT.sonnetLowJudgment) return "low";
-    return "medium";
+    if (judgment === null) return done("medium", "sonnet-unscored");
+    if (judgment >= EFFORT.sonnetHighJudgment) return done("high", "sonnet-open-ended");
+    if (judgment < EFFORT.sonnetLowJudgment) return done("low", "sonnet-mechanical");
+    return done("medium", "sonnet-well-specified");
   }
   if (tier === "opus") {
-    if ((mean !== null && mean >= EFFORT.opusHighMean) || (judgment !== null && judgment >= EFFORT.opusHighJudgment)) return "high";
-    return "medium";
+    const longHorizon =
+      signals.headless === true && (signals.briefChars ?? 0) >= EFFORT.xhighBriefChars && hard && judgment !== null && judgment >= EFFORT.xhighJudgment;
+    if (longHorizon) return done("xhigh", "opus-long-horizon");
+    if (hard) return done("high", "opus-hard-reasoning");
+    if (openEnded) return done("high", "opus-open-ended");
+    return done("medium", "opus-default");
   }
-  return "high";
+  return done("high", "default-high");
 }
+
+/** The effort level for work routed to `tier`, or null when the tier takes none (Haiku). */
+export const effortFor = (tier, metrics, cls, signals) => effortWhy(tier, metrics, cls, signals).level;
 
 /**
  * Same ratchet as the tier: inside one tier an ongoing session only moves effort up, because a
@@ -216,6 +240,6 @@ export function effortFor(tier, metrics) {
  */
 export function settleEffort({ target, previous, fresh, tierChanged }) {
   if (target === null) return null;
-  if (fresh || tierChanged || !EFFORT_ORDER.includes(previous)) return target;
-  return EFFORT_ORDER.indexOf(target) > EFFORT_ORDER.indexOf(previous) ? target : previous;
+  if (fresh || tierChanged || !EFFORT_LEVELS.includes(previous)) return target;
+  return EFFORT_LEVELS.indexOf(target) > EFFORT_LEVELS.indexOf(previous) ? target : previous;
 }

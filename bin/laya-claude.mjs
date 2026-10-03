@@ -8,7 +8,7 @@ import { startProxy } from "../src/proxy.mjs";
 import { findDaemonProxy } from "../src/attach.mjs";
 import { warmSidecar } from "../src/router.mjs";
 import { AUTO_MODEL, routingEnabled } from "../src/config.mjs";
-import { readSavedModel, restoreSavedModel, sessionSettings, routerEnv, stepRoutingEnv } from "../src/settings.mjs";
+import { readSavedModel, restoreSavedModel, sessionSettings, routerEnv, stepRoutingEnv, headlessEnv } from "../src/settings.mjs";
 import { LOG_FILE } from "../src/log.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -223,6 +223,7 @@ if (routingEnabled()) {
   env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = "1";
   Object.assign(env, routerEnv(process.env));
   Object.assign(env, stepRoutingEnv(process.env));
+  Object.assign(env, headlessEnv(args, env));
   Object.assign(env, autoModelEnv());
   process.on("exit", () => {
     close();

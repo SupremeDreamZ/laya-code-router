@@ -15,7 +15,7 @@ import {
   STEP_FRAMING,
 } from "./config.mjs";
 import { askLaya } from "./router.mjs";
-import { decide, decideStep, effortFor, settleEffort } from "./policy.mjs";
+import { decide, decideStep, effortWhy, settleEffort } from "./policy.mjs";
 import { requestClass, adaptForModel, filterBetas, stepHazard } from "./wire.mjs";
 import { log } from "./log.mjs";
 import { createUsageTap, decoderFor, readableEncodings } from "./usage.mjs";
@@ -309,6 +309,13 @@ export function observeModel(state, current) {
  */
 export const STEP_HEADER = "x-laya-step-routing";
 
+/**
+ * Header `laya-claude` asks Claude Code to send when it was started headless (-p / --print). The
+ * proxy cannot otherwise tell a run nobody is steering from a terminal session, and that is the
+ * signal xhigh effort needs (config.mjs, EFFORT). Stripped before anything goes upstream.
+ */
+export const HEADLESS_HEADER = "x-laya-headless";
+
 /** Whether step routing is on for this request: the app's setting, the environment, or the header. */
 const stepsOn = (prefs, headers) =>
   prefs?.stepRouting === true || process.env.LAYA_STEP_ROUTING === "1" || headers?.[STEP_HEADER] === "1";
@@ -538,14 +545,19 @@ export async function startProxy({
                     : modelForTier(models, tier);
               // Effort is decided with the tier and held by the same ratchet, unless the
               // app has effort turned off, in which case the model keeps whatever it chose.
+              const why = effortWhy(tier, laya?.metrics, subagent ? "subagent" : "main", {
+                headless: req.headers[HEADLESS_HEADER] === "1",
+                briefChars: prompt.length,
+              });
               state.effort = prefs?.effortAuto === false
                 ? undefined
                 : settleEffort({
-                  target: effortFor(tier, laya?.metrics),
+                  target: why.level,
                   previous: state.effort ?? null,
                   fresh: freshSession,
                   tierChanged: tier !== current,
                 });
+              state.effortReason = state.effort === why.level ? why.reason : `${why.reason}/ratchet-held`;
               state.tier = tier;
               state.model = model;
               // A sub-agent's choice is its own; only the main conversation is a parent.
@@ -596,9 +608,11 @@ export async function startProxy({
                   state.tier = d.tier;
                   state.model = modelForTier(models, d.tier);
                   // A switch starts cold anyway, so the new tier's own effort costs nothing extra.
+                  const why = effortWhy(d.tier, laya?.metrics, subagent ? "subagent" : "main");
                   state.effort = prefs?.effortAuto === false
                     ? undefined
-                    : settleEffort({ target: effortFor(d.tier, laya?.metrics), previous: state.effort ?? null, fresh: false, tierChanged: true });
+                    : settleEffort({ target: why.level, previous: state.effort ?? null, fresh: false, tierChanged: true });
+                  state.effortReason = state.effort === why.level ? why.reason : `${why.reason}/ratchet-held`;
                   if (!subagent) recordParent(session, state.tier, state.model);
                 }
                 step = {
@@ -629,8 +643,13 @@ export async function startProxy({
             applyTier(body, tier, model);
             // Only the launcher's default marks "the user did not choose"; a level they set
             // themselves (/effort, --effort) is left exactly as sent.
-            if (state.effort && body.output_config?.effort === EFFORT.launcherDefault) {
+            let effortReason = null;
+            if (!tierSpec(tier)?.effort) effortReason = "haiku-takes-none";
+            else if (prefs?.effortAuto === false) effortReason = "effort-auto-off";
+            else if (body.output_config?.effort !== undefined && body.output_config.effort !== EFFORT.launcherDefault) effortReason = "user-chosen";
+            else if (state.effort && body.output_config?.effort === EFFORT.launcherDefault) {
               body.output_config.effort = state.effort;
+              effortReason = state.effortReason ?? null;
             }
             // Claude Code shaped this request for Opus. Whatever is per-model rather than
             // per-tier (system-role messages, max_tokens, betas) is fixed for the model chosen.
@@ -647,6 +666,7 @@ export async function startProxy({
                 tier,
                 model,
                 effort: body.output_config?.effort ?? null,
+                effortReason,
                 reason: report?.reason ?? reason ?? null,
                 session: sessionOf(body),
                 prompt: humanTurn ? (prompt ?? undefined) : undefined,
@@ -678,6 +698,7 @@ export async function startProxy({
       delete headers["content-length"];
       // The launcher's own switch, meant for this proxy only.
       delete headers[STEP_HEADER];
+      delete headers[HEADLESS_HEADER];
       if (routedModel && headers["anthropic-beta"]) {
         headers["anthropic-beta"] = filterBetas(headers["anthropic-beta"], routedModel);
       }

@@ -34,6 +34,18 @@ export function stepRoutingEnv(existing = process.env) {
 }
 
 /**
+ * A headless run (`-p` / `--print`) tells the proxy so, as the x-laya-headless request header, the
+ * same way step routing does. Nobody steers such a run, which is half of what makes its work
+ * long-horizon (config.mjs, EFFORT). `env` is the environment being built, whose own headers are kept.
+ */
+export function headlessEnv(args = [], env = process.env) {
+  if (!args.some((a) => a === "-p" || a === "--print")) return {};
+  const header = "x-laya-headless: 1";
+  const own = env.ANTHROPIC_CUSTOM_HEADERS;
+  return { ANTHROPIC_CUSTOM_HEADERS: own ? `${own}\n${header}` : header };
+}
+
+/**
  * Settings the launcher passes with `--settings`. That flag layers over the user's own
  * settings.json, while the process environment does NOT: a user-level `env` block beats it.
  * Measured with claude 2.1.285 and ANTHROPIC_BASE_URL in ~/.claude/settings.json (the gateway

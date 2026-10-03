@@ -325,25 +325,59 @@ export const shouldUseExactModel = (reason, chosenTier, finalTier) =>
   (reason === "laya" || reason === "laya/no-change") && chosenTier === finalTier;
 
 /**
- * Effort the router picks per turn. Anthropic (platform.claude.com/docs/en/build-with-claude/effort):
- * lower effort is faster and cheaper for straightforward work; for agentic coding on Sonnet 5.5,
- * "start with medium for well-specified tasks and move to high for harder or longer ones"; Opus
- * 5.5's own default is medium. Haiku takes no effort parameter.
+ * Effort the router picks, following Anthropic's effort guide
+ * (https://platform.claude.com/docs/en/build-with-claude/effort, read 2026-10-03). What it says,
+ * and what each threshold below does with it:
  *
- * Both signals come from LAYA: `judgment` (would this need investigating, design, or several
- * files) and the blended mean. Measured on the 116 labeled prompts, Sonnet-routed turns split
- * 13 low / 18 medium / 4 high and Opus-routed turns 21 medium / 25 high. The cuts are a
- * starting point, not a fit: nothing here has been checked against answer quality.
+ *  - "Claude Opus 5.5 defaults to medium", and the guide recommends starting there and testing
+ *    several levels: at medium it "matches or exceeds Claude Opus 5 at high on coding and
+ *    knowledge-work evaluations" (Prompting Claude Opus 5.5, "Calibrate effort"). So Opus is
+ *    medium, and goes to high only when LAYA scores the work as hard reasoning.
+ *  - Sonnet 5.5: "For agentic coding and multistep tool use, start with medium for well-specified
+ *    tasks and move to high for harder or longer ones." Mechanical work is "low" ("simpler tasks
+ *    that need the best speed and lowest costs").
+ *  - Sub-agents: low is "for ... simpler tasks that need the best speed and lowest costs, such as
+ *    subagents". A sub-agent is low unless its own task scores hard.
+ *  - xhigh: "long-running agentic and coding tasks (over 30 minutes) with token budgets in the
+ *    millions", and "reserve xhigh and max for work where you've measured a quality gain". The
+ *    router cannot see how long a task will run; the nearest signal it has is a headless (-p) run,
+ *    with nobody steering it, started from a long brief, whose work LAYA also scores as needing
+ *    investigation or design. All four must hold, and only Opus gets it.
+ *  - max: "the deepest possible reasoning", justified case by case. Never chosen here; a level the
+ *    user sets themselves is left alone.
+ *  - Haiku takes no effort parameter. Fable 5.1: "Start with high, the default."
+ *
+ * The scores LAYA gives sit in a narrow band (0.35 to 0.67, see SCORE_TIER) and 0.58 is the typical
+ * hard score. The first cuts here (0.55 mean, 0.65 judgment) sat just above the Opus floor, so
+ * nearly everything that reached Opus was high: 732 of 933 Opus requests in the owner's log. The
+ * cuts below are placed on the upper part of the band. Like the tier cuts they are a starting
+ * point, not a fit; nothing here has been checked against answer quality.
  */
 export const EFFORT = {
-  /** Sonnet: a stated task (judgment below this) needs little thinking. */
+  /** Sonnet: a stated task (judgment below this) needs little thinking: low. */
   sonnetLowJudgment: 0.25,
-  /** Sonnet: work that needs investigating or design (judgment at or above this) gets high. */
+  /** Sonnet: work that needs investigating or design (judgment at or above this) is "harder": high. */
   sonnetHighJudgment: 0.6,
-  /** Opus: a blended score at or above this is hard work and gets high. */
-  opusHighMean: 0.55,
-  /** Opus: open-ended work (judgment at or above this) gets high whatever the blend says. */
-  opusHighJudgment: 0.65,
+  /** Opus: a blended score at or above this is hard reasoning: high. Above the 0.58 typical hard score. */
+  opusHighMean: 0.62,
+  /** Opus: open-ended work (judgment at or above this: unknown cause, design) is high whatever the blend says. */
+  opusHighJudgment: 0.8,
+  /** Opus xhigh: a headless run whose brief is at least this long (characters) ... */
+  xhighBriefChars: 2000,
+  /** ... and whose work needs at least this much judgment, and scores hard overall (opusHighMean). */
+  xhighJudgment: 0.85,
+  /** Sub-agent: medium once its own task scores at least this blended ("scores hard") ... */
+  subagentMediumMean: 0.55,
+  /** ... or needs at least this much judgment. Otherwise low. High needs the Opus cuts above. */
+  subagentMediumJudgment: 0.6,
+  /**
+   * Inside a tool loop, how many levels below the level the turn opened at a step may go. A step
+   * is scored from the assistant's next tool call alone, which reads as mechanical ("cat file.js")
+   * even when the turn is hard; the first live step check moved a design question's final step to
+   * the cheap model that way. One level lets a long read-only stretch run lighter without
+   * letting the step that does the thinking drop to low.
+   */
+  stepMaxDrop: 1,
   /**
    * The launcher's session settings make Claude Code send this level, which is the documented
    * default for the Claude 5.5 models. It is the marker for "the user did not choose", so the
@@ -351,6 +385,9 @@ export const EFFORT = {
    */
   launcherDefault: "medium",
 };
+
+/** Levels in order, for comparing and for the step floor. */
+export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
 
 /**
  * Wording that marks design-shaped work. LAYA reads a brevity constraint on the ANSWER ("top 3

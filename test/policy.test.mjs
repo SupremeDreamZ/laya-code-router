@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { decide, detectOverride, tierFromScores, effortFor, settleEffort, isDesignWork } from "../src/policy.mjs";
-import { SCORE_QUESTIONS, SCORE_TIER, shouldUseExactModel } from "../src/config.mjs";
+import { decide, detectOverride, tierFromScores, effortFor, effortWhy, settleEffort, isDesignWork } from "../src/policy.mjs";
+import { SCORE_QUESTIONS, SCORE_TIER, EFFORT, shouldUseExactModel } from "../src/config.mjs";
 
 const ALL = ["haiku", "sonnet", "opus", "fable"];
 // The bridge computes this shape: rubric scores normalised to 0..1, confidence = the
@@ -237,10 +237,66 @@ test("effort: sonnet is low for a stated task, medium by default, high for work 
   assert.equal(effortFor("sonnet", at(0.49, 0.75)), "high");
 });
 
-test("effort: opus is medium for well-specified work and high for hard or open-ended work", () => {
+test("effort: opus starts at its documented default, medium, and goes up only for hard reasoning", () => {
+  // 0.58 is the typical hard score (see "a typical ordinary score lands on sonnet..."): it reaches
+  // Opus, and Opus 5.5 at medium is what Anthropic recommends for it, so it is not high.
   assert.equal(effortFor("opus", at(0.52, 0.30)), "medium");
-  assert.equal(effortFor("opus", at(0.56, 0.30)), "high");
-  assert.equal(effortFor("opus", at(0.52, 0.70)), "high");
+  assert.equal(effortFor("opus", at(0.58, 0.30)), "medium");
+  assert.equal(effortFor("opus", at(0.58, 0.70)), "medium");
+  assert.equal(effortFor("opus", at(0.64, 0.30)), "high", "a blended score in the top of the band is hard reasoning");
+  assert.equal(effortFor("opus", at(0.52, 0.85)), "high", "work that needs investigating or design is open-ended");
+});
+
+test("effort: the cuts for high sit above the Opus floor, so most of what reaches Opus is not high", () => {
+  assert.ok(EFFORT.opusHighMean > scoreTierFor("balanced").strongFloor + 0.05);
+  assert.ok(EFFORT.opusHighMean > 0.58, "the typical hard score stays at the default");
+  assert.ok(EFFORT.opusHighMean <= 0.67, "and the top of the band LAYA produces can still reach it");
+});
+
+test("effort: xhigh is for long-horizon work only: a headless run, a long brief, and high judgment together", () => {
+  const long = { headless: true, briefChars: 5000 };
+  assert.equal(effortFor("opus", at(0.64, 0.9), "main", long), "xhigh");
+  assert.equal(effortFor("opus", at(0.64, 0.9), "main", { headless: false, briefChars: 5000 }), "high", "someone is watching");
+  assert.equal(effortFor("opus", at(0.64, 0.9), "main", { headless: true, briefChars: 300 }), "high", "a short brief");
+  assert.equal(effortFor("opus", at(0.64, 0.5), "main", long), "high", "judgment is not high");
+  assert.equal(effortFor("opus", at(0.52, 0.9), "main", long), "high", "the work is not hard overall");
+  assert.equal(effortFor("sonnet", at(0.64, 0.9), "main", long), "high", "Sonnet 5.5 uses xhigh only where evals show a gain");
+});
+
+test("effort: max is never chosen automatically", () => {
+  for (const tier of ["sonnet", "opus", "fable"]) {
+    for (const cls of ["main", "subagent"]) {
+      for (const m of [at(0.9, 1), at(0.1, 0), null]) {
+        assert.notEqual(effortFor(tier, m, cls, { headless: true, briefChars: 99999 }), "max");
+      }
+    }
+  }
+});
+
+test("effort: a sub-agent is low unless its own task scores hard", () => {
+  assert.equal(effortFor("sonnet", at(0.49, 0.30), "subagent"), "low");
+  assert.equal(effortFor("opus", at(0.52, 0.40), "subagent"), "low");
+  assert.equal(effortFor("opus", at(0.56, 0.40), "subagent"), "medium");
+  assert.equal(effortFor("sonnet", at(0.49, 0.70), "subagent"), "medium");
+  assert.equal(effortFor("opus", at(0.64, 0.40), "subagent"), "high");
+  assert.equal(effortFor("opus", at(0.52, 0.85), "subagent"), "high");
+  assert.equal(effortFor("haiku", at(0.9, 1), "subagent"), null);
+});
+
+test("effort: a sub-agent LAYA could not score is not assumed to be simple", () => {
+  assert.equal(effortFor("sonnet", null, "subagent"), "medium");
+});
+
+test("effort: every answer says why, so the mix can be read from the events", () => {
+  assert.deepEqual(effortWhy("opus", at(0.52, 0.3)), { level: "medium", reason: "opus-default" });
+  assert.deepEqual(effortWhy("opus", at(0.64, 0.3)), { level: "high", reason: "opus-hard-reasoning" });
+  assert.deepEqual(effortWhy("opus", at(0.52, 0.9)), { level: "high", reason: "opus-open-ended" });
+  assert.equal(effortWhy("opus", at(0.64, 0.9), "main", { headless: true, briefChars: 5000 }).reason, "opus-long-horizon");
+  assert.equal(effortWhy("sonnet", at(0.49, 0.1)).reason, "sonnet-mechanical");
+  assert.equal(effortWhy("sonnet", at(0.49, 0.4)).reason, "sonnet-well-specified");
+  assert.equal(effortWhy("sonnet", at(0.49, 0.8)).reason, "sonnet-open-ended");
+  assert.equal(effortWhy("sonnet", at(0.49, 0.2), "subagent").reason, "subagent-default");
+  assert.equal(effortWhy("haiku", at(0.2, 0.1)).level, null);
 });
 
 test("effort: without a judgment answer it stays at the documented default", () => {

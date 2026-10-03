@@ -273,7 +273,7 @@ function handle(action, arg) {
     case "engine.stop":
       return stopEngine(engineArg(arg));
     case "event": {
-      const { kind, tier, model, effort, reason, usage, prompt, ms, confidence, session, class: cls, step, status } = arg ?? {};
+      const { kind, tier, model, effort, effortReason, reason, usage, prompt, ms, confidence, session, class: cls, step, status } = arg ?? {};
       const at = Date.now();
       const entry = {
         at,
@@ -283,6 +283,8 @@ function handle(action, arg) {
         tier,
         model,
         effort,
+        // Why that level: the rule in policy.effortWhy, "user-chosen", or "effort-auto-off".
+        effortReason,
         reason,
         ms,
         confidence,
