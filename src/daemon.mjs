@@ -272,11 +272,13 @@ function handle(action, arg) {
     case "engine.stop":
       return stopEngine(engineArg(arg));
     case "event": {
-      const { kind, tier, model, effort, reason, usage, prompt, ms, confidence, session } = arg ?? {};
+      const { kind, tier, model, effort, reason, usage, prompt, ms, confidence, session, class: cls } = arg ?? {};
       const at = Date.now();
       const entry = {
         at,
         kind,
+        // main | subagent | auxiliary | step: which conversation, or which mid-task check, this was.
+        class: cls,
         tier,
         model,
         effort,

@@ -75,15 +75,27 @@ async function harness(t, route) {
 const user = (text) => ({ role: "user", content: [{ type: "text", text }] });
 const asst = (text) => ({ role: "assistant", content: [{ type: "text", text }] });
 
-test("a request labelled auxiliary or subagent is never sent to LAYA and never changes the tier", async (t) => {
+test("a request labelled auxiliary is never sent to LAYA and never changes the tier", async (t) => {
   const h = await harness(t, score(0.6));
   await h.post({ cls: "main", messages: [user("redesign the whole auth system")] }); // -> opus
   h.asked.length = 0;
   const aux = await h.post({ cls: "auxiliary", messages: [user("write a session title")] });
-  const sub = await h.post({ cls: "subagent", messages: [user("explore the repo")] });
-  assert.deepEqual(h.asked, [], "LAYA is asked only for the user's own messages");
+  assert.deepEqual(h.asked, [], "background work is not scored");
   assert.equal(aux.body.model, "claude-haiku-4-5-20251001", "background work goes to the cheap model");
-  assert.equal(sub.body.model, "claude-opus-5-5", "a sub-agent keeps the session's tier");
+  const again = await h.post({ cls: "main", messages: [user("redesign the whole auth system"), asst("ok"), { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "done" }] }] });
+  assert.equal(again.body.model, "claude-opus-5-5", "the session keeps its tier");
+});
+
+test("a sub-agent is scored on its own task, and the main conversation keeps its tier", async (t) => {
+  const scores = [0.6, 0.35];
+  let i = 0;
+  const h = await harness(t, async () => score(scores[i++])());
+  await h.post({ cls: "main", messages: [user("redesign the whole auth system")] }); // -> opus
+  const sub = await h.post({ cls: "subagent", messages: [user("explore the repo")] });
+  assert.deepEqual(h.asked, ["redesign the whole auth system", "explore the repo"]);
+  assert.equal(sub.body.model, "claude-haiku-4-5-20251001", "the sub-agent got its own tier");
+  const main = await h.post({ cls: "main", messages: [user("redesign the whole auth system"), asst("ok"), { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "done" }] }] });
+  assert.equal(main.body.model, "claude-opus-5-5", "the main conversation did not follow it down");
 });
 
 test("a compaction request keeps the session's tier and is not treated as the user's message", async (t) => {

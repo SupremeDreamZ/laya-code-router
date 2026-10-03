@@ -156,6 +156,29 @@ export function claudeModels(catalog = [], { fillMissingTiers = false } = {}) {
 const modelForTier = (models, tier) => models.find((model) => model.tier === tier)?.id ?? idOf(tier);
 
 /**
+ * One question to the router, as an answer or null. `askLaya` already returns null on failure, but
+ * `route` is injectable, and a router that throws must cost a decision, never the request: an
+ * exception here would forward the sentinel model name upstream unrewritten.
+ */
+async function ask(route, input, deadlineMs = null) {
+  let timer;
+  try {
+    const answer = route(input);
+    if (!deadlineMs) return (await answer) ?? null;
+    const late = new Promise((resolve) => {
+      timer = setTimeout(() => resolve(null), deadlineMs);
+      timer.unref?.();
+    });
+    return (await Promise.race([answer, late])) ?? null;
+  } catch (err) {
+    debug(`routing failed, keeping the current model: ${err?.message ?? err}`);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * Identifies the conversation a request belongs to. Claude Code runs sub-agents through the
  * same endpoint, so a single pinned model would let a sub-agent's choice leak into the main
  * conversation.
@@ -248,6 +271,15 @@ export async function startProxy({
     }
     return s;
   };
+  // The main conversation's tier and model per session. A sub-agent that LAYA cannot score runs on
+  // what its parent runs on: that is the tier the user's own turn was given, where the placeholder
+  // would hand every unscored sub-agent the top tier.
+  const parents = new Map();
+  const recordParent = (session, tier, model) => {
+    if (!session) return;
+    if (!parents.has(session) && parents.size > 50) parents.delete(parents.keys().next().value);
+    parents.set(session, { tier, model });
+  };
 
   const server = http.createServer((req, res) => {
     // Claude Code probes the base URL before its first request.
@@ -301,13 +333,20 @@ export async function startProxy({
           } else {
             const key = conversationKey(body);
             const state = stateFor(key);
-            // What the prompt cache was built on, which is what a downgrade would discard.
-            const current = state.tier ?? "opus";
-            // Claude Code labels each request when CLAUDE_CODE_GATEWAY_HINT_HEADERS=1. Only a
-            // "main" request can be a message the user wrote; the rest ride the session's tier
-            // (sub-agents, compaction, workflows) or go to the cheap model (background work).
+            const session = sessionOf(body) || String(req.headers["x-claude-code-session-id"] ?? "");
+            // Claude Code labels each request when CLAUDE_CODE_GATEWAY_HINT_HEADERS=1. A "main"
+            // request can be a message the user wrote, and a sub-agent's opening request is the
+            // task its parent wrote for it; both are scored, each for its own conversation.
+            // Compaction and workflows ride the conversation's tier, background work goes to the
+            // cheap model.
             const cls = requestClass(req.headers);
-            const humanTurn = cls === undefined || cls === "main";
+            const subagent = cls === "subagent";
+            const humanTurn = cls === undefined || cls === "main" || subagent;
+            // A sub-agent with no tier of its own yet stands on its parent's, so a sub-agent that
+            // LAYA cannot score runs on what the main conversation runs on.
+            const parent = subagent && state.tier === null ? parents.get(session) : undefined;
+            // What the prompt cache was built on, which is what a downgrade would discard.
+            const current = state.tier ?? parent?.tier ?? "opus";
             const prompt = humanTurn ? newTurnPrompt(body) : null;
             const explaining = prompt?.includes("<laya-explain>");
             let fresh = null;
@@ -317,7 +356,7 @@ export async function startProxy({
             // background or paused work, otherwise the decision. Declared once here so the
             // routing branch and the rewrite below cannot disagree.
             let tier = state.forceTier ?? state.tier ?? current;
-            let model = state.forceModel ?? state.model ?? idOf(tier);
+            let model = state.forceModel ?? state.model ?? parent?.model ?? idOf(tier);
             if (cls === "auxiliary") {
               state.forceModel = idOf("haiku");
               state.forceTier = "haiku";
@@ -352,9 +391,9 @@ export async function startProxy({
                 fillMissingTiers: upstreamURL !== ANTHROPIC_BASE_URL,
               }).filter(inTier);
               const available = [...new Set(models.map((model) => model.tier))];
-              const currentModel = state.model ?? modelForTier(models, current);
+              const currentModel = state.model ?? parent?.model ?? modelForTier(models, current);
               const contextTokens = Math.round(JSON.stringify(body.messages).length / 4);
-              laya = await route({ prompt, current: currentModel, contextTokens, models: catalogModels });
+              laya = await ask(route, { prompt, current: currentModel, contextTokens, models: catalogModels });
               // No ongoing decision to protect: a session that is new, has been idle, or was
               // just compacted may move either way; otherwise the tier only goes up.
               const idleMs = Date.now() - (state.lastSeen ?? 0);
@@ -395,6 +434,8 @@ export async function startProxy({
                 });
               state.tier = tier;
               state.model = model;
+              // A sub-agent's choice is its own; only the main conversation is a parent.
+              if (!subagent) recordParent(session, tier, model);
               fresh = {
                 effort: state.effort,
                 prompt,
@@ -414,7 +455,7 @@ export async function startProxy({
             // Recomputed after the decision: the forced tier wins for background and paused
             // work, otherwise this is the tier the router chose for this turn.
             tier = state.forceTier ?? state.tier ?? current;
-            model = state.forceModel ?? state.model ?? idOf(tier);
+            model = state.forceModel ?? state.model ?? parent?.model ?? idOf(tier);
             debug(`${key} rewrite ${body.model} -> ${model}${cls ? ` [${cls}]` : ""}`);
             applyTier(body, tier, model);
             // Only the launcher's default marks "the user did not choose"; a level they set
@@ -432,6 +473,7 @@ export async function startProxy({
             if (onEvent) {
               report = {
                 ...(report ?? { kind: "routed" }),
+                class: cls === "auxiliary" ? "auxiliary" : subagent ? "subagent" : "main",
                 tier,
                 model,
                 effort: body.output_config?.effort ?? null,
