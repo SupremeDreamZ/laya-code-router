@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync, mkdirSync, accessSync, constants } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, accessSync, constants, openSync, readSync, closeSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -97,27 +97,81 @@ for (const file of [
 }
 
 /**
+ * True when the first bytes are something the kernel can exec: a `#!` line, or a binary with a
+ * recognised magic number. A plain text file with no shebang passes `accessSync(X_OK)` but fails
+ * `execve` with ENOEXEC, which is exactly what npm leaves in `bin/claude.exe` when it blocks
+ * Claude Code's postinstall. Checking the magic here turns that silent breakage into a message
+ * that names the real cause.
+ */
+function isExecutableFile(file) {
+  let fd;
+  try {
+    fd = openSync(file, "r");
+    const head = Buffer.alloc(4);
+    const read = readSync(fd, head, 0, 4, 0);
+    if (read < 2) return false;
+    if (head[0] === 0x23 && head[1] === 0x21) return true; // "#!"
+    // Mach-O (both endiannesses), ELF, and PE. Anything else is not a program.
+    return (
+      head.readUInt32BE(0) === 0xfeedface ||
+      head.readUInt32BE(0) === 0xfeedfacf ||
+      head.readUInt32LE(0) === 0xfeedface ||
+      head.readUInt32LE(0) === 0xfeedfacf ||
+      head.readUInt32BE(0) === 0x7f454c46 ||
+      (head[0] === 0x4d && head[1] === 0x5a) // "MZ"
+    );
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) try { closeSync(fd); } catch { /* already gone */ }
+  }
+}
+
+/**
  * Finds the Claude Code executable on PATH. Resolving it here rather than leaning on the
  * shell means arguments are passed as an array (no quoting hazard, no DEP0190 warning) and
  * a missing install produces a useful message instead of a shell error. Older npm-based
  * installs are a `.cmd` shim, which Node still refuses to run without a shell.
+ *
+ * Returns `{ file, shell }` for a real program, `{ file, blocked: true }` for the
+ * placeholder npm writes when an install script is blocked, and null when there is no
+ * `claude` at all.
  */
 function resolveClaude() {
   const win = process.platform === "win32";
   const exts = win ? (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";") : [""];
+  let blocked = null;
   for (const dir of (process.env.PATH ?? "").split(win ? ";" : ":")) {
     if (!dir) continue;
     for (const ext of exts) {
       const file = join(dir.replace(/^"|"$/g, ""), `claude${ext}`);
       try {
         accessSync(file, constants.X_OK);
-        return { file, shell: /\.(cmd|bat)$/i.test(file) };
       } catch {
-        // Not here; keep looking.
+        continue; // Not here; keep looking.
       }
+      if (win) return { file, shell: /\.(cmd|bat)$/i.test(file) };
+      if (!isExecutableFile(file)) {
+        // Remember the first unusable one so a later directory cannot mask the real problem.
+        blocked ??= file;
+        continue;
+      }
+      return { file, shell: false };
     }
   }
-  return null;
+  return blocked ? { file: blocked, blocked: true } : null;
+}
+
+/** The message for a `claude` that exists but cannot be run, which means a blocked postinstall. */
+function blockedInstallMessage(file) {
+  return (
+    `[laya] Found \`claude\` at ${file}, but it is not a runnable program.\n` +
+    `[laya] That is the placeholder npm leaves when it blocks an install script. Claude Code's\n` +
+    `[laya] postinstall copies the real binary into place, so npm has to be allowed to run it:\n` +
+    `[laya]   npm config set allow-scripts=@anthropic-ai/claude-code --location=user\n` +
+    `[laya]   npm install -g @anthropic-ai/claude-code@latest\n` +
+    `[laya] Then run laya-claude again. See https://code.claude.com/docs/en/setup\n`
+  );
 }
 
 const args = process.argv.slice(2);
@@ -131,6 +185,11 @@ if (!claude) {
       "[laya] laya-claude runs the real Claude Code CLI; install it first:\n" +
       "[laya]   https://code.claude.com/docs/en/setup\n",
   );
+  process.exit(1);
+}
+
+if (claude.blocked) {
+  process.stderr.write(blockedInstallMessage(claude.file));
   process.exit(1);
 }
 
@@ -166,12 +225,25 @@ if (routingEnabled()) {
   );
 }
 
-// On Windows a `.cmd` shim still needs a shell; a real executable does not.
-const child = spawn(claude.file, claude.shell ? args.map((a) => (/\s/.test(a) ? `"${a}"` : a)) : args, {
-  stdio: "inherit",
-  shell: claude.shell,
-  env,
-});
+// On Windows a `.cmd` shim still needs a shell; a real executable does not. A file the kernel
+// cannot exec fails `spawn` synchronously rather than emitting "error", so the throw is caught
+// here; without this the user sees a raw Node stack trace instead of the cause.
+let child;
+try {
+  child = spawn(claude.file, claude.shell ? args.map((a) => (/\s/.test(a) ? `"${a}"` : a)) : args, {
+    stdio: "inherit",
+    shell: claude.shell,
+    env,
+  });
+} catch (err) {
+  const blocked = ["ENOEXEC", "ENOENT", "EACCES"].includes(err.code);
+  process.stderr.write(
+    blocked
+      ? blockedInstallMessage(claude.file)
+      : `[laya] could not start Claude Code: ${err.message}\n`,
+  );
+  process.exit(1);
+}
 
 child.on("error", (err) => {
   process.stderr.write(`[laya] could not start Claude Code: ${err.message}\n`);
