@@ -86,8 +86,13 @@ export function decide({ prompt, laya, current, available, contextTokens = 0, fr
   if (target === "haiku" && isDesignWork(prompt)) target = "sonnet";
 
   if (laya.confidence != null && laya.confidence < THRESHOLDS.minConfidence) {
-    if (rankOf(target) < rankOf(current)) return settle(current, "low-confidence-no-downgrade");
-    const ceiling = Math.max(rankOf(current), rankOf(THRESHOLDS.uncertainCeiling));
+    // An ongoing session never downgrades on an uncertain rubric. A fresh one has no decision
+    // to protect: its `current` is only the proxy's placeholder ("opus" before any tier is
+    // set), so measuring against it would pin every uncertain new session to the top tier.
+    // Measure a fresh session against the uncertain ceiling instead.
+    const baseline = fresh ? THRESHOLDS.uncertainCeiling : current;
+    if (rankOf(target) < rankOf(baseline)) return settle(baseline, "low-confidence-no-downgrade");
+    const ceiling = Math.max(rankOf(baseline), rankOf(THRESHOLDS.uncertainCeiling));
     if (rankOf(target) > ceiling) return settle(TIER_NAMES[ceiling], "low-confidence-capped");
   }
 

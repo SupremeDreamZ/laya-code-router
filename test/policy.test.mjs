@@ -89,6 +89,24 @@ test("allows a downgrade when the session has no ongoing decision to build on", 
   assert.equal(decide({ ...base, current: "opus", laya: rubric(0.05), fresh: true }).tier, "haiku");
 });
 
+// A brand-new session reaches decide() with current = "opus" only because the proxy has no tier
+// yet (state.tier ?? "opus"). There is no cache to protect, so an uncertain rubric must not be
+// pinned to that placeholder: it lands on the uncertain ceiling, as the rule documents.
+test("a fresh session with a low-confidence rubric is not pinned to the placeholder opus", () => {
+  const down = decide({ ...base, current: "opus", laya: rubric(0.3, 0.09), fresh: true });
+  assert.equal(down.tier, "sonnet");
+  assert.match(down.reason, /low-confidence/);
+  const up = decide({ ...base, current: "opus", laya: rubric(0.9, 0.09), fresh: true });
+  assert.equal(up.tier, "sonnet");
+  assert.match(up.reason, /low-confidence-capped/);
+});
+
+test("an ongoing session with a low-confidence rubric still never downgrades", () => {
+  const out = decide({ ...base, current: "opus", laya: rubric(0.3, 0.09), fresh: false });
+  assert.equal(out.tier, "opus");
+  assert.match(out.reason, /low-confidence-no-downgrade/);
+});
+
 test("substitutes upward when the chosen tier is unavailable", () => {
   const out = decide({ ...base, current: "haiku", available: ["haiku", "opus"], laya: rubric(0.47) });
   assert.equal(out.tier, "opus");
