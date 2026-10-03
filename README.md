@@ -69,6 +69,39 @@ LAYA scores that task and the sub-agent keeps the result for its whole tool loop
 changes the main conversation's model. If LAYA cannot answer, the sub-agent runs on whatever the main
 conversation is running on. Claude Code's background calls (titles, summaries) still go to Haiku.
 
+### Effort
+
+Effort (how hard the model thinks) follows [Anthropic's effort guide](https://platform.claude.com/docs/en/build-with-claude/effort),
+not a habit of "high". The guide's defaults are the starting point, and the router moves from them only
+when LAYA's scores say to:
+
+- **Opus 5.5** starts at **medium**, its documented default, and goes to **high** only when LAYA scores
+  the work as hard reasoning (a mean of 0.62 or more) or as open-ended investigation or design
+  (judgment 0.80 or more).
+- **xhigh** is for long-running agentic work, the guide's "over 30 minutes". The router cannot see how
+  long a task will run, so it needs four things at once: Opus, a headless `-p` run nobody is steering, a
+  brief of 2,000 characters or more, and judgment 0.85 or more on hard work. Otherwise never.
+- **Sonnet 5.5**: **medium** for a well-specified task, **high** when the work is open-ended
+  (judgment 0.6 or more), **low** when it is clearly mechanical (judgment under 0.25).
+- **Sub-agents** are **low**, the guide's example for it, unless their own task scores hard
+  (medium at a mean of 0.55 or judgment 0.6, high at the Opus cuts above).
+- **max** is never chosen for you, and **Haiku** takes no effort setting.
+- A level you set yourself (`--effort`, `/effort`) is left exactly as you set it, and so is everything
+  when "let the router choose effort" is off in the app.
+
+**It is decided again at every step.** On Opus 5.5, Opus 5, Sonnet 5.5 and Fable 5.1, Anthropic's
+[per-message effort](https://platform.claude.com/docs/en/build-with-claude/effort#change-effort-mid-conversation-beta)
+(a beta) changes the level without losing the prompt cache. The conversation's top-level effort stays
+at what it started with, and at every new turn, and every 4th tool call inside a turn, the router asks
+LAYA about the next step and, when the answer differs, adds an effort-only message in front of the
+latest one. The level moves down as well as up. Inside a turn it may not fall more than one level
+below where the turn opened, because a single tool call reads as simpler than the task it belongs to.
+Other models keep a top-level value that only goes up, since changing it restarts the cache. If the
+API ever refuses an effort message, per-step effort switches itself off for the rest of that run;
+`LAYA_EFFORT_STEPS=0` (or the `effortSteps` setting) turns it off yourself. Every request in
+`~/.laya-router/events.jsonl` records `effort`, `effortReason` and `class`, so you can see the mix.
+`node test/live-effort.mjs` runs a short real session and prints it.
+
 ### Step routing (off by default)
 
 With step routing on, the router also checks in the middle of a tool loop, "between thoughts". Every
@@ -154,6 +187,7 @@ Put these in `~/.laya-router.env` or the environment.
 | `LAYA_MODEL` | Use a different LAYA checkpoint for every decision. |
 | `LAYA_ALLOW_FABLE` | Enables the opt-in long tier when the app is not running. |
 | `LAYA_STEP_ROUTING` | `1` turns on step routing for this session. |
+| `LAYA_EFFORT_STEPS` | `0` stops re-deciding effort inside a tool loop (it stays on at each new turn). |
 | `LAYA_EVENTS_FILE` | Without the app, appends each routed request to this file as JSON. |
 | `LAYA_DEBUG` | Logs decisions to `~/.laya-claude.log`. |
 
