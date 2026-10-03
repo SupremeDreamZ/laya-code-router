@@ -115,6 +115,17 @@ export const THRESHOLDS = {
   /** Longest step prompt sent to LAYA. The rubric reads intent, and intent is in the first lines. */
   stepPromptChars: 1500,
   /**
+   * Plan-aware pacing. Several sessions share one plan, and the 5-hour window is what stops them all
+   * at once. At or above this fraction of it, a NEW decision that would land on Opus gets Sonnet
+   * ("plan-pace-cap"); a conversation already on Opus stays, and a tier the user named is never
+   * capped. 0.85 leaves the last 15% of the window for the work already running on Opus.
+   */
+  paceCapAt: 0.85,
+  /** A window that resets sooner than this is not paced: what is left of it is there to be used. */
+  paceMinResetMs: 20 * 60_000,
+  /** How long one read of the plan's limits file is reused. The daemon rewrites it about once a second. */
+  paceReadMs: 5000,
+  /**
    * LAYA sidecar thresholds. The sidecar loads its model as soon as it starts (6 to 10 s measured on
    * an M2 Max with the weights already on disk; a slower machine takes longer), so a prompt rarely
    * waits for a load, and one that does waits behind it.

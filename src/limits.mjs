@@ -14,6 +14,7 @@
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { HOME_DIR } from "./prefs.mjs";
+import { THRESHOLDS } from "./config.mjs";
 
 export const LIMITS_FILE = () => join(HOME_DIR(), "limits.json");
 
@@ -135,6 +136,17 @@ export function activeWindows(state, now = Date.now()) {
       const ib = ORDER.indexOf(b.key);
       return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || a.key.localeCompare(b.key);
     });
+}
+
+/**
+ * Whether routing should hold new decisions off Opus: the 5-hour window is at or over `capAt` and
+ * resets more than `minResetMs` from now. Anything unknown (no reading, no reset time, a window
+ * that already reset) is false, so a missing figure never changes a decision.
+ */
+export function paceCapActive(state, now = Date.now(), { capAt = THRESHOLDS.paceCapAt, minResetMs = THRESHOLDS.paceMinResetMs } = {}) {
+  const win = activeWindows(state, now).find((w) => w.key === "5h");
+  if (!win || !Number.isFinite(win.utilization) || !Number.isFinite(win.resetsAt)) return false;
+  return win.utilization >= capAt && win.resetsAt - now > minResetMs;
 }
 
 /**

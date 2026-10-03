@@ -19,7 +19,7 @@ import { decide, decideStep, effortFor, settleEffort } from "./policy.mjs";
 import { requestClass, adaptForModel, filterBetas, stepHazard } from "./wire.mjs";
 import { log } from "./log.mjs";
 import { createUsageTap, decoderFor, readableEncodings } from "./usage.mjs";
-import { parseLimitHeaders } from "./limits.mjs";
+import { parseLimitHeaders, loadLimits, paceCapActive } from "./limits.mjs";
 import { PREFS_FILE, defaultPrefs, mergePrefs } from "./prefs.mjs";
 import { writeDecision, writeStatus } from "./status.mjs";
 
@@ -339,7 +339,27 @@ export async function startProxy({
   onLimits = null,
   port: wantedPort = 0,
   stepDeadlineMs = THRESHOLDS.stepDeadlineMs,
+  limits = null,
 } = {}) {
+  // The plan's limits as the daemon last saved them, for pacing. Read through limits.mjs and reused
+  // for a few seconds (the daemon rewrites the file about once a second while turns run). A missing
+  // or unreadable file is null, and null never caps anything.
+  let limitsRead = { at: 0, value: null };
+  const readLimits =
+    limits ??
+    (() => {
+      if (Date.now() - limitsRead.at < THRESHOLDS.paceReadMs) return limitsRead.value;
+      limitsRead = { at: Date.now(), value: loadLimits() };
+      return limitsRead.value;
+    });
+  const pacing = () => {
+    try {
+      return paceCapActive(readLimits());
+    } catch (err) {
+      debug(`could not read the plan's limits, not pacing: ${err?.message ?? err}`);
+      return false;
+    }
+  };
   // Tier routed for each conversation's turn in flight, reused by its follow-up requests and
   // by the cache-rebuild guard, which needs to know what the prompt cache was built on.
   const convos = new Map();
@@ -445,7 +465,7 @@ export async function startProxy({
             const humanTurn = cls === undefined || cls === "main" || subagent;
             // A sub-agent with no tier of its own yet stands on its parent's, so a sub-agent that
             // LAYA cannot score runs on what the main conversation runs on.
-            const parent = subagent && state.tier === null ? parents.get(session) : undefined;
+            const parent = subagent && !state.tier ? parents.get(session) : undefined;
             // What the prompt cache was built on, which is what a downgrade would discard.
             const current = state.tier ?? parent?.tier ?? "opus";
             const prompt = humanTurn ? newTurnPrompt(body) : null;
@@ -499,6 +519,7 @@ export async function startProxy({
                 contextTokens,
                 fresh: freshSession,
                 preset: prefs?.preset,
+                paceCap: pacing(),
               }));
               state.freshNext = false;
               // A new turn starts its own count of tool-loop steps, and a tier the user named for
@@ -568,6 +589,7 @@ export async function startProxy({
                   step: size,
                   hazard: (target) => stepHazard(body, modelForTier(models, target)),
                   preset: prefs?.preset,
+                  paceCap: pacing(),
                 });
                 reason = d.reason;
                 if (d.switched) {

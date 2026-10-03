@@ -69,9 +69,11 @@ export function tierFromScores(metrics = {}, preset = "balanced") {
  * @param {string} input.current       tier currently active in the session
  * @param {string[]} input.available   tier names the account can run
  * @param {number} input.contextTokens approximate size of the conversation so far
+ * @param {string} [input.preset]      the app's preset, which shifts the score cuts
+ * @param {boolean} [input.paceCap]    the plan's 5-hour window is near its limit (limits.paceCapActive)
  * @returns {{tier: string, reason: string, changed: boolean}}
  */
-export function decide({ prompt, laya, current, available, contextTokens = 0, fresh = false, preset = "balanced" }) {
+export function decide({ prompt, laya, current, available, contextTokens = 0, fresh = false, preset = "balanced", paceCap = false }) {
   const settle = (tier, reason) => {
     const final = clampToAvailable(tier, available) ?? current;
     const why = final === tier ? reason : `${reason}+unavailable`;
@@ -81,6 +83,17 @@ export function decide({ prompt, laya, current, available, contextTokens = 0, fr
   const override = detectOverride(prompt);
   if (override) return settle(override, "override");
 
+  const decided = decideFromLaya({ prompt, laya, current, available, contextTokens, fresh, preset, settle });
+  // Plan-aware pacing: near the 5-hour limit a NEW landing on Opus gets Sonnet. A conversation
+  // already on Opus (not fresh) stays: pacing only shapes new decisions, it never moves one down.
+  if (paceCap && decided.tier === "opus" && (fresh || current !== "opus") && available.includes("sonnet")) {
+    return settle("sonnet", "plan-pace-cap");
+  }
+  return decided;
+}
+
+/** `decide` once no override applies: what LAYA's answer is worth, under the ratchet. */
+function decideFromLaya({ prompt, laya, current, available, contextTokens, fresh, preset, settle }) {
   if (!laya) return settle(current, "laya-unavailable");
 
   let target = tierFromScores(laya.metrics, preset);
@@ -144,7 +157,7 @@ export function stepCost({ current, target, contextTokens, step, horizon = THRES
  *
  * @returns {{tier: string, switched: boolean, reason: string, target?: string, saving: number, rebuild: number}}
  */
-export function decideStep({ prompt, laya, current, available, contextTokens = 0, step, hazard = () => null, preset = "balanced" }) {
+export function decideStep({ prompt, laya, current, available, contextTokens = 0, step, hazard = () => null, preset = "balanced", paceCap = false }) {
   const none = { saving: 0, rebuild: 0 };
   const stay = (reason, extra = none) => ({ tier: current, switched: false, reason, ...extra });
   if (!laya) return stay("step-laya-unavailable");
@@ -153,7 +166,11 @@ export function decideStep({ prompt, laya, current, available, contextTokens = 0
   if (target === "haiku" && isDesignWork(prompt)) target = "sonnet";
   target = clampToAvailable(target, available) ?? current;
   if (!(laya.confidence >= THRESHOLDS.minConfidence)) return stay("step-low-confidence", { target, ...none });
-  if (target === current) return stay("step-same-tier");
+  // Pacing, as in `decide`: a step may not newly land on Opus near the 5-hour limit. A loop that
+  // is already on Opus is not on this path (its target equals its tier, or is lower).
+  const paced = paceCap && target === "opus" && current !== "opus" && available.includes("sonnet");
+  if (paced) target = "sonnet";
+  if (target === current) return stay(paced ? "plan-pace-cap" : "step-same-tier");
   const cost = { target, ...stepCost({ current, target, contextTokens, step }) };
   const up = rankOf(target) > rankOf(current);
   if (!up) {
@@ -162,7 +179,7 @@ export function decideStep({ prompt, laya, current, available, contextTokens = 0
   }
   const why = hazard(target);
   if (why) return stay(`step-refused-${why}`, cost);
-  return { tier: target, switched: true, reason: up ? "step-upgrade" : "step-downgrade", ...cost };
+  return { tier: target, switched: true, reason: paced ? "plan-pace-cap" : up ? "step-upgrade" : "step-downgrade", ...cost };
 }
 
 const EFFORT_ORDER = ["low", "medium", "high"];
