@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startProxy } from "../src/proxy.mjs";
 import { savePrefs } from "../src/prefs.mjs";
+import { isEffortMessage } from "../src/wire.mjs";
 
 // Shared by the effort tests (not a test file itself): the real proxy in front of a stub upstream
 // that records exactly what it was sent, with a scripted `route` standing in for LAYA.
@@ -14,7 +15,15 @@ export const score = (mean, judgment) => ({
   confidence: 0.5, ms: 1, request: {}, response: {},
 });
 
-export async function harness(t, { route, prefs = null, env = {} } = {}) {
+/** The top-level level a request carries, and the level in effect: the last effort message, else the top-level. */
+export function effortInEffect(body) {
+  const top = body.output_config?.effort ?? null;
+  const messages = body.messages.filter(isEffortMessage);
+  return { top, inEffect: messages.at(-1)?.output_config.effort ?? top };
+}
+
+/** `models` is what the stub's /v1/models lists; `status(body)` picks the stub's HTTP status for a request. */
+export async function harness(t, { route, prefs = null, env = {}, models = [], status = () => 200 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "laya-effort-"));
   const prevHome = process.env.LAYA_HOME;
   process.env.LAYA_HOME = dir;
@@ -31,12 +40,15 @@ export async function harness(t, { route, prefs = null, env = {} } = {}) {
     req.on("end", () => {
       if (/^\/v1\/models/.test(req.url)) {
         res.writeHead(200, { "content-type": "application/json" });
-        return res.end('{"data":[]}');
+        return res.end(JSON.stringify({ data: models }));
       }
       const body = JSON.parse(Buffer.concat(chunks).toString());
       seen.push({ body, headers: req.headers });
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ id: "m", type: "message", model: body.model, content: [], usage: { input_tokens: 1, output_tokens: 1 } }));
+      const code = status(body);
+      res.writeHead(code, { "content-type": "application/json" });
+      res.end(JSON.stringify(code >= 400
+        ? { type: "error", error: { type: "invalid_request_error", message: "stub refused" } }
+        : { id: "m", type: "message", model: body.model, content: [], usage: { input_tokens: 1, output_tokens: 1 } }));
     });
   });
   await new Promise((r) => upstream.listen(0, "127.0.0.1", r));
@@ -81,5 +93,7 @@ export async function harness(t, { route, prefs = null, env = {} } = {}) {
     await res.text();
     return seen.at(-1);
   };
-  return { send, asked, events, seen };
+  /** What Claude Code does first: ask for the model list, which the proxy keeps. */
+  const listModels = async () => (await fetch(`http://127.0.0.1:${port}/v1/models`)).text();
+  return { send, asked, events, seen, models: listModels };
 }

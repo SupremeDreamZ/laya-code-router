@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { startProxy } from "../src/proxy.mjs";
+import { effortInEffect } from "./effort-harness.mjs";
 
 // End-to-end through the real proxy with a stub upstream that records exactly what it received
 // and a scripted `route` standing in for LAYA. Bodies mirror what claude 2.1.285 sends.
@@ -236,7 +237,7 @@ test("effort: follow-up tool calls in the same turn keep the level chosen for th
   assert.equal(follow.body.output_config.effort, "low");
 });
 
-test("effort: a later harder message in the same session raises it and an easier one does not lower it", async (t) => {
+test("effort: a later message moves the level either way: Sonnet 5.5 and Opus 5.5 take it per message, so there is no ratchet", async (t) => {
   let level = [0.49, 0.15];
   const h = await harness(t, async (a) => scoreJ(...level)(a));
   const first = await h.post({ messages: [user("Bump lodash.")], extra: withEffort("medium") });
@@ -244,7 +245,9 @@ test("effort: a later harder message in the same session raises it and an easier
   const harder = await h.post({ messages: [user("Bump lodash."), asst("ok"), user("Now find why jobs run twice.")], extra: withEffort("medium") });
   level = [0.49, 0.15];
   const easier = await h.post({ messages: [user("Bump lodash."), asst("ok"), user("Now find why jobs run twice."), asst("ok"), user("Rename x to y.")], extra: withEffort("medium") });
-  assert.equal(first.body.output_config.effort, "low");
-  assert.equal(harder.body.output_config.effort, "high");
-  assert.equal(easier.body.output_config.effort, "high");
+  assert.equal(effortInEffect(first.body).inEffect, "low");
+  assert.equal(effortInEffect(harder.body).inEffect, "high");
+  // Still on opus (the tier ratchet holds), but the level comes back down to the documented default.
+  assert.equal(easier.body.model, "claude-opus-5-5");
+  assert.deepEqual(effortInEffect(easier.body), { top: "high", inEffect: "medium" });
 });

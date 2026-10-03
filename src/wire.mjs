@@ -69,15 +69,17 @@ function addTool(tools, block) {
  * at the end (tool results have to stay first). A system message that follows no user message
  * becomes one; one with nothing foldable disappears. Mutates `body`; returns the count folded.
  */
-function foldSystemMessages(body) {
+function foldSystemMessages(body, keepEffort = false) {
   const messages = body.messages;
-  const count = Array.isArray(messages) ? messages.filter((m) => m?.role === "system").length : 0;
+  // An effort-only message has no text to fold, and a model that takes effort per message needs it left alone.
+  const keep = (m) => keepEffort && isEffortMessage(m);
+  const count = Array.isArray(messages) ? messages.filter((m) => m?.role === "system" && !keep(m)).length : 0;
   if (!count) return 0;
   let tools = Array.isArray(body.tools) ? body.tools : [];
   const before = tools;
   const out = [];
   for (const message of messages) {
-    if (message?.role !== "system") {
+    if (message?.role !== "system" || keep(message)) {
       out.push(message);
       continue;
     }
@@ -144,6 +146,56 @@ export function stepHazard(body, model, { checksPrefix = (m) => PREFIX_CHECKED.t
 }
 
 /**
+ * Per-message effort (beta): a `role: "system"` message with empty `content` and the new level in
+ * `output_config.effort` sets the level from the next user turn on, and keeps the prompt cache
+ * (platform.claude.com/docs/en/build-with-claude/effort, "Change effort mid-conversation", read
+ * 2026-10-03). It needs this beta header, and a model that supports it: any other returns a 400.
+ */
+export const EFFORT_BETA = "mid-conversation-output-config-2026-07-01";
+const MESSAGE_EFFORT_MODELS = /^claude-(?:opus-5(?:-5)?|sonnet-5-5|fable-5-1|mythos-5-1)(?:-\d{8})?$/;
+export const takesMessageEffort = (model) => MESSAGE_EFFORT_MODELS.test(String(model ?? ""));
+
+/** An effort-only system message, ours or a client's: no text, just a level. */
+export const isEffortMessage = (m) =>
+  m?.role === "system" && Array.isArray(m.content) && m.content.length === 0 && typeof m.output_config?.effort === "string";
+export const hasEffortMessages = (body) => Array.isArray(body?.messages) && body.messages.some(isEffortMessage);
+
+/**
+ * Puts each effort message in `marks` ({at, effort}) in front of the `at`-th conversational (not
+ * system) message of the request, and returns how many went in. Claude Code does not know the
+ * messages exist and never sends them back, so the proxy replays every mark it has made at the same
+ * place on every later request: that is what keeps the earlier part of the conversation, and so the
+ * cached prefix, byte for byte what it was. A mark past the end of the conversation is dropped.
+ */
+export function withEffortMessages(body, marks) {
+  const messages = Array.isArray(body?.messages) ? body.messages : [];
+  const out = [];
+  let at = 0;
+  let placed = 0;
+  for (const message of messages) {
+    if (message?.role !== "system") {
+      for (const mark of marks) {
+        if (mark.at === at) {
+          out.push({ role: "system", content: [], output_config: { effort: mark.effort } });
+          placed++;
+        }
+      }
+      at++;
+    }
+    out.push(message);
+  }
+  if (placed) body.messages = out;
+  return placed;
+}
+
+/** `header` (an anthropic-beta value) with `flag` added once, and everything already in it kept. */
+export function mergeBeta(header, flag) {
+  if (typeof header !== "string" || !header.trim()) return flag;
+  if (header.split(",").some((f) => f.trim() === flag)) return header;
+  return `${header},${flag}`;
+}
+
+/**
  * Makes a request Claude Code shaped for Opus acceptable to `model`. Mutates `body`.
  * Fields a tier cannot take at all (thinking, effort, context management) are the tier
  * table's job in applyTier; this covers what is per-model rather than per-tier.
@@ -154,7 +206,9 @@ export function adaptForModel(body, model) {
   const capped = capOutput(body, outputLimitFor(model));
   if (capped !== undefined) result.capped = capped;
   if (!takesSystemMessages(model)) {
-    const folded = foldSystemMessages(body);
+    // Opus 5 and Mythos 5.1 take effort messages but are not on the measured list of models that take
+    // text system messages, so only the effort-only ones are kept.
+    const folded = foldSystemMessages(body, takesMessageEffort(model));
     if (folded) result.folded = folded;
   }
   return result;

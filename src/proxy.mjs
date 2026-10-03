@@ -11,12 +11,24 @@ import {
   isAuto,
   shouldUseExactModel,
   EFFORT,
+  EFFORT_LEVELS,
   THRESHOLDS,
   STEP_FRAMING,
 } from "./config.mjs";
 import { askLaya } from "./router.mjs";
 import { decide, decideStep, effortWhy, settleEffort } from "./policy.mjs";
-import { requestClass, adaptForModel, filterBetas, stepHazard } from "./wire.mjs";
+import {
+  requestClass,
+  adaptForModel,
+  filterBetas,
+  stepHazard,
+  takesMessageEffort,
+  hasEffortMessages,
+  isEffortMessage,
+  withEffortMessages,
+  mergeBeta,
+  EFFORT_BETA,
+} from "./wire.mjs";
 import { log } from "./log.mjs";
 import { createUsageTap, decoderFor, readableEncodings } from "./usage.mjs";
 import { parseLimitHeaders, loadLimits, paceCapActive } from "./limits.mjs";
@@ -271,7 +283,8 @@ export function sessionOf(body) {
 
 export function conversationKey(body) {
   const session = sessionOf(body);
-  const content = body?.messages?.[0]?.content;
+  // An effort message (wire.withEffortMessages) is never part of a conversation's identity.
+  const content = (body?.messages ?? []).find((m) => !isEffortMessage(m))?.content;
   const text =
     typeof content === "string"
       ? content
@@ -319,6 +332,20 @@ export const HEADLESS_HEADER = "x-laya-headless";
 /** Whether step routing is on for this request: the app's setting, the environment, or the header. */
 const stepsOn = (prefs, headers) =>
   prefs?.stepRouting === true || process.env.LAYA_STEP_ROUTING === "1" || headers?.[STEP_HEADER] === "1";
+
+/**
+ * Whether effort is re-decided inside a tool loop: on unless the app's effortSteps is off or
+ * LAYA_EFFORT_STEPS=0. It only ever applies to a model that can change effort per message.
+ */
+const effortStepsOn = (prefs) => prefs?.effortSteps !== false && process.env.LAYA_EFFORT_STEPS !== "0";
+
+/**
+ * Whether this request can carry effort as a per-message change. Sonnet 5.5 with `between_tools`
+ * thinking returns a 400 for a level that differs from the one in effect, so it never gets one, and
+ * a client that sends effort messages itself is managing effort and is left to it.
+ */
+const messageEffortOk = (body, model) =>
+  takesMessageEffort(model) && body?.thinking?.type !== "between_tools" && !hasEffortMessages(body);
 
 let prefsCache = { mtimeMs: 0, value: null };
 function readPrefs() {
@@ -371,6 +398,10 @@ export async function startProxy({
   // by the cache-rebuild guard, which needs to know what the prompt cache was built on.
   const convos = new Map();
   const catalog = new Map();
+  // Set when the API answers 400 to a request that carried an effort message. Per-message effort is
+  // a beta; if this account or model refuses it, effort goes back to the top-level value, as before,
+  // for the rest of this run, instead of failing every request that follows.
+  let effortBroken = false;
   const stateFor = (key) => {
     let s = convos.get(key);
     if (!s) {
@@ -415,6 +446,7 @@ export async function startProxy({
     req.on("end", async () => {
       let out = Buffer.concat(chunks);
       let routedModel = null;
+      let effortBeta = false;
       // What this request is, for the app's live feed: a tap on the response reads the token
       // usage the API itself reports, and the rest is the decision already made above.
       let report = null;
@@ -497,6 +529,16 @@ export async function startProxy({
             // router may pick, and whether the router chooses effort at all. Without the app
             // these are null and the proxy behaves exactly as the command-line launcher does.
             const prefs = readPrefs();
+            // Step checks: whether the tier may move (step routing; never on a turn the user pinned with
+            // `use <tier>`) and whether effort may (the model takes it per message, the level is ours to set).
+            const stepRouting = stepsOn(prefs, req.headers) && !state.pinned;
+            const effortSteps =
+              effortStepsOn(prefs) &&
+              !effortBroken &&
+              prefs?.effortAuto !== false &&
+              Boolean(state.effort) &&
+              (body.output_config?.effort ?? EFFORT.launcherDefault) === EFFORT.launcherDefault &&
+              messageEffortOk(body, state.model ?? idOf(state.tier));
             if (prefs && !prefs.enabled) {
               // Paused: every turn runs on one fixed model, untouched. The conversation's
               // routing state is cleared so that turning routing back on starts from the
@@ -549,15 +591,21 @@ export async function startProxy({
                 headless: req.headers[HEADLESS_HEADER] === "1",
                 briefChars: prompt.length,
               });
+              // A model that takes effort per message moves it either way, because that keeps the
+              // cache; any other keeps the ratchet, since a top-level change restarts the cache.
+              const perMessage = !effortBroken && messageEffortOk(body, model);
               state.effort = prefs?.effortAuto === false
                 ? undefined
                 : settleEffort({
                   target: why.level,
                   previous: state.effort ?? null,
-                  fresh: freshSession,
+                  fresh: freshSession || perMessage,
                   tierChanged: tier !== current,
                 });
               state.effortReason = state.effort === why.level ? why.reason : `${why.reason}/ratchet-held`;
+              // What a step later may drop from, and what xhigh judged the turn by.
+              state.turnEffort = state.effort;
+              state.briefChars = prompt.length;
               state.tier = tier;
               state.model = model;
               // A sub-agent's choice is its own; only the main conversation is a parent.
@@ -575,10 +623,11 @@ export async function startProxy({
                 `${key} ${laya && laya.confidence != null ? `${laya.ms}ms p=${laya.confidence.toFixed(2)}` : "no-laya"} ` +
                   `${current} -> ${tier} (${reason}) ctx~${contextTokens} | ${prompt.slice(0, 60)}`,
               );
-            } else if (stepsOn(prefs, req.headers) && humanTurn && state.tier && !state.pinned && isToolContinuation(body)) {
+            } else if (humanTurn && state.tier && isToolContinuation(body) && (stepRouting || effortSteps)) {
               // A step: the conversation is inside a tool loop on a tier it already has. Asked at
               // most every `stepEvery` continuations, never twice in a row, and only when the
-              // assistant's last message says what it is doing.
+              // assistant's last message says what it is doing. One answer serves both jobs: the
+              // model switch (when step routing is on) and the effort level (when effort can move).
               state.continuations = (state.continuations ?? 0) + 1;
               const due = state.continuations - (state.stepAskedAt ?? 0) >= Math.max(2, THRESHOLDS.stepEvery);
               const stepText = due ? stepPrompt(body) : null;
@@ -592,7 +641,7 @@ export async function startProxy({
                 const contextTokens = Math.max(Math.round(JSON.stringify(body.messages).length / 4), state.prefixTokens ?? 0);
                 laya = await ask(route, { prompt: stepText, current: currentModel, contextTokens, models: catalogModels }, stepDeadlineMs);
                 const size = stepSize(body);
-                const d = decideStep({
+                const d = !stepRouting ? null : decideStep({
                   prompt: stepText,
                   laya,
                   current,
@@ -603,8 +652,8 @@ export async function startProxy({
                   preset: prefs?.preset,
                   paceCap: pacing(),
                 });
-                reason = d.reason;
-                if (d.switched) {
+                reason = d?.reason ?? "step-effort-check";
+                if (d?.switched) {
                   state.tier = d.tier;
                   state.model = modelForTier(models, d.tier);
                   // A switch starts cold anyway, so the new tier's own effort costs nothing extra.
@@ -615,21 +664,43 @@ export async function startProxy({
                   state.effortReason = state.effort === why.level ? why.reason : `${why.reason}/ratchet-held`;
                   if (!subagent) recordParent(session, state.tier, state.model);
                 }
+                // Effort for the next steps, from what LAYA made of this one. No ratchet: it moves
+                // down as well as up. It may not fall more than EFFORT.stepMaxDrop levels below where
+                // the turn opened, because a step is scored from its next tool call alone. No answer,
+                // or an unsure one, keeps the level.
+                let effortChange = null;
+                if (effortSteps && laya && laya.confidence >= THRESHOLDS.minConfidence) {
+                  const why = effortWhy(state.tier, laya.metrics, subagent ? "subagent" : "main", {
+                    headless: req.headers[HEADLESS_HEADER] === "1",
+                    briefChars: state.briefChars ?? 0,
+                  });
+                  if (why.level) {
+                    const opened = EFFORT_LEVELS.indexOf(state.turnEffort ?? why.level);
+                    const floor = Math.max(0, opened - EFFORT.stepMaxDrop);
+                    const clamped = EFFORT_LEVELS.indexOf(why.level) < floor;
+                    const level = clamped ? EFFORT_LEVELS[floor] : why.level;
+                    effortChange = { from: state.effort, to: level };
+                    state.effort = level;
+                    state.effortReason = `step-${why.reason}${clamped ? "/floor" : ""}`;
+                  }
+                }
                 step = {
                   of: subagent ? "subagent" : "main",
                   from: current,
                   to: state.tier,
-                  switched: d.switched,
-                  target: d.target ?? null,
-                  saving: d.saving,
-                  rebuild: d.rebuild,
+                  switched: d?.switched ?? false,
+                  target: d?.target ?? null,
+                  saving: d?.saving ?? 0,
+                  rebuild: d?.rebuild ?? 0,
                   contextTokens,
                   stepTokens: size,
                   prompt: stepText,
+                  ...(effortChange ? { effort: effortChange } : {}),
                 };
                 debug(
                   `${key} step ${state.continuations} ${laya && laya.confidence != null ? `${laya.ms}ms p=${laya.confidence.toFixed(2)}` : "no-laya"} ` +
-                    `${current} -> ${state.tier} (${reason}) save~$${d.saving.toFixed(4)} rebuild~$${d.rebuild.toFixed(4)} ctx~${contextTokens}`,
+                    `${current} -> ${state.tier} (${reason}) save~$${(d?.saving ?? 0).toFixed(4)} rebuild~$${(d?.rebuild ?? 0).toFixed(4)} ctx~${contextTokens}` +
+                    `${effortChange ? ` effort ${effortChange.from} -> ${effortChange.to}` : ""}`,
                 );
               }
             }
@@ -641,21 +712,48 @@ export async function startProxy({
             model = state.forceModel ?? state.model ?? parent?.model ?? idOf(tier);
             debug(`${key} rewrite ${body.model} -> ${model}${cls ? ` [${cls}]` : ""}`);
             applyTier(body, tier, model);
-            // Only the launcher's default marks "the user did not choose"; a level they set
-            // themselves (/effort, --effort) is left exactly as sent.
-            let effortReason = null;
-            if (!tierSpec(tier)?.effort) effortReason = "haiku-takes-none";
-            else if (prefs?.effortAuto === false) effortReason = "effort-auto-off";
-            else if (body.output_config?.effort !== undefined && body.output_config.effort !== EFFORT.launcherDefault) effortReason = "user-chosen";
-            else if (state.effort && body.output_config?.effort === EFFORT.launcherDefault) {
-              body.output_config.effort = state.effort;
-              effortReason = state.effortReason ?? null;
-            }
             // Claude Code shaped this request for Opus. Whatever is per-model rather than
             // per-tier (system-role messages, max_tokens, betas) is fixed for the model chosen.
             const adapted = adaptForModel(body, model);
             if (adapted.folded || adapted.capped) {
               debug(`${key} adapted for ${model}: ${adapted.folded ? `folded ${adapted.folded} system message(s) ` : ""}${adapted.capped ? `max_tokens<=${adapted.capped}` : ""}`);
+            }
+            // Effort. Only the launcher's default marks "the user did not choose"; a level they set
+            // themselves (/effort, --effort) is left exactly as sent. On a model that takes it per
+            // message the top-level value is fixed at the conversation's first (a change would
+            // restart the cache) and the level in effect moves by message; elsewhere it is top-level.
+            // After adaptForModel, whose system-message folding must not see these messages.
+            let effortReason = null;
+            let effortTop = null;
+            let effortMsgs = 0;
+            let effortNow = null;
+            const sent = body.output_config?.effort;
+            if (!tierSpec(tier)?.effort) effortReason = "haiku-takes-none";
+            else if (hasEffortMessages(body)) effortReason = "client-managed";
+            else if (prefs?.effortAuto === false) effortReason = "effort-auto-off";
+            else if (sent !== undefined && sent !== EFFORT.launcherDefault) effortReason = "user-chosen";
+            else if (state.effort && sent === EFFORT.launcherDefault) {
+              effortReason = state.effortReason ?? null;
+              effortNow = state.effort;
+              if (!effortBroken && messageEffortOk(body, model)) {
+                if (state.effortModel !== model || !state.marks) {
+                  // The first request on this model: its level is the conversation's top-level value.
+                  Object.assign(state, { effortModel: model, effortTop: state.effort, effortNow: state.effort, marks: [] });
+                }
+                body.output_config.effort = state.effortTop;
+                const conversational = conversationalOf(body);
+                const lastAt = conversational.length - 1;
+                if (state.effort !== state.effortNow && conversational[lastAt]?.role === "user") {
+                  state.marks.push({ at: lastAt, effort: state.effort });
+                  state.effortNow = state.effort;
+                }
+                effortMsgs = withEffortMessages(body, state.marks);
+                effortBeta = effortMsgs > 0;
+                effortTop = state.effortTop;
+                effortNow = state.effortNow;
+              } else {
+                body.output_config.effort = state.effort;
+              }
             }
             routedModel = model;
             if (onEvent) {
@@ -665,8 +763,11 @@ export async function startProxy({
                 ...(step ? { step } : {}),
                 tier,
                 model,
-                effort: body.output_config?.effort ?? null,
+                // The level in effect for this request. With per-message effort the top-level value is
+                // `effortTop` and stays fixed; `effortMsgs` is how many effort messages the request carries.
+                effort: effortNow ?? body.output_config?.effort ?? null,
                 effortReason,
+                ...(effortMsgs ? { effortTop, effortMsgs } : {}),
                 reason: report?.reason ?? reason ?? null,
                 session: sessionOf(body),
                 prompt: humanTurn ? (prompt ?? undefined) : undefined,
@@ -699,6 +800,7 @@ export async function startProxy({
       // The launcher's own switch, meant for this proxy only.
       delete headers[STEP_HEADER];
       delete headers[HEADLESS_HEADER];
+      if (effortBeta) headers["anthropic-beta"] = mergeBeta(headers["anthropic-beta"], EFFORT_BETA);
       if (routedModel && headers["anthropic-beta"]) {
         headers["anthropic-beta"] = filterBetas(headers["anthropic-beta"], routedModel);
       }
@@ -799,6 +901,10 @@ export async function startProxy({
             const finish = (usage, model) => {
               if (reported) return;
               reported = true;
+              if (up.statusCode === 400 && report.effortMsgs) {
+                effortBroken = true;
+                debug("the API refused a request that carried an effort message: per-step effort is off for this run");
+              }
               if (usage && convo) convo.prefixTokens = (usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
               // The status says whether the model this was routed to accepted the request at all.
               emit({ ...report, model: report.model ?? model ?? undefined, status: up.statusCode, ...(usage ? { usage } : {}), kind: report.kind ?? "routed" });

@@ -116,7 +116,10 @@ async function harness(t, { route, prefs = null, env = {}, stepDeadlineMs, usage
 
 const isStep = (prompt) => prompt.startsWith("Next step of an ongoing task:");
 const opusThenHaiku = ({ prompt }) => (isStep(prompt) ? at(0.37) : at(0.6));
-const ON = mergePrefs(defaultPrefs(), { stepRouting: true });
+// These tests are about the model switch. Per-step effort (effort-steps.test.mjs) is on by default and
+// asks LAYA at the same points, so it is switched off here to keep what is counted the switch's own.
+const NO_EFFORT_STEPS = { effortSteps: false };
+const ON = mergePrefs(defaultPrefs(), { stepRouting: true, ...NO_EFFORT_STEPS });
 
 // ---- what LAYA is asked ----
 
@@ -148,7 +151,7 @@ test("the average step is measured from the conversation itself", () => {
 // ---- off by default ----
 
 test("off by default: a tool loop never asks LAYA again", async (t) => {
-  const h = await harness(t, { route: opusThenHaiku });
+  const h = await harness(t, { route: opusThenHaiku, prefs: mergePrefs(defaultPrefs(), NO_EFFORT_STEPS) });
   const out = await h.run(8);
   assert.equal(h.asked.length, 1, "only the opening turn");
   assert.ok(out.every((s) => s.body.model === "claude-opus-5-5"));
