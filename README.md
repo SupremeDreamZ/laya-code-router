@@ -43,7 +43,8 @@ so and `claude auth login` fixes it. Nothing here asks for your credentials.
 
 ## What it does
 
-One routing decision per fresh user turn. LAYA scores the prompt on three rubrics (task
+One routing decision per fresh user turn and per sub-agent, plus, if you turn it on, checks between
+the steps of a tool loop. LAYA scores the prompt on three rubrics (task
 complexity, reasoning required, tool complexity) and one judgment question; `src/policy.mjs` turns
 the scores into a tier:
 
@@ -60,6 +61,50 @@ the scores into a tier:
 
 If the routing model fails, is slow, or is not loaded, the turn goes on with the model it already
 has. Routing never holds a prompt for more than 15 seconds (60 while the model is still loading).
+
+### Sub-agents
+
+A sub-agent is routed on its own. Its first request carries the task the main agent wrote for it;
+LAYA scores that task and the sub-agent keeps the result for its whole tool loop. Its choice never
+changes the main conversation's model. If LAYA cannot answer, the sub-agent runs on whatever the main
+conversation is running on. Claude Code's background calls (titles, summaries) still go to Haiku.
+
+### Step routing (off by default)
+
+With step routing on, the router also checks in the middle of a tool loop, "between thoughts". Every
+4th tool call of a turn (never two in a row) it asks LAYA about what the assistant is about to do: its
+latest text and the names and arguments of its tool calls. It never sends the assistant's thinking or
+the tool output.
+
+- Moving up is allowed whenever LAYA is confident.
+- Moving down throws away the prompt cache, so it also has to pay for itself: the saving over the
+  next 6 steps, at the size of this conversation's steps so far, has to beat the cost of re-reading
+  the context on the cheaper model, and the context has to be under 40,000 tokens.
+- A turn where you named a model (`use opus`) is not checked.
+- A switch the API could reject is refused and the reason recorded.
+
+Turn it on per session with `LAYA_STEP_ROUTING=1 laya-claude ...`, which also works for headless
+`-p` workers that share the app's router, or for every session with the setting `stepRouting: true`
+(the app has no switch for it yet; the daemon accepts it through `prefs.update`). Every check is recorded in
+the live feed (`~/.laya-router/events.jsonl`) as `class: "step"`, with LAYA's confidence, whether it
+switched, and the estimated saving and cache rebuild, so you can see whether it pays.
+`node test/live-step-routing.mjs` runs a short real session with it on.
+
+### Presets
+
+The app's preset moves the score cuts. **Balanced** is the numbers above. **Save most** raises the
+Opus floor to 0.54 and the Haiku cuts to 0.50 / 0.416, so the same scores land cheaper. **Careful**
+lowers them to 0.49 and 0.46 / 0.376. The judgment veto that keeps investigation and design work off
+Haiku does not move. On the 58 labelled prompts, Save most sends 24 to Opus, Balanced 31, Careful 39,
+and none sends hard work to Haiku.
+
+### Pacing
+
+Several sessions share one plan, and the 5-hour window is what stops them all. When it is 85% used
+and resets more than 20 minutes from now, any new decision that would land on Opus (a turn, a
+sub-agent or a step) gets Sonnet, with the reason `plan-pace-cap`. A conversation already on Opus
+stays there, and a model you named or picked yourself is never capped. With no usage figure, nothing
+is capped.
 
 ### Measured, not promised
 
@@ -108,6 +153,8 @@ Put these in `~/.laya-router.env` or the environment.
 | `LAYA_NO_DAEMON` | `1` keeps a session private even while the app runs. |
 | `LAYA_MODEL` | Use a different LAYA checkpoint for every decision. |
 | `LAYA_ALLOW_FABLE` | Enables the opt-in long tier when the app is not running. |
+| `LAYA_STEP_ROUTING` | `1` turns on step routing for this session. |
+| `LAYA_EVENTS_FILE` | Without the app, appends each routed request to this file as JSON. |
 | `LAYA_DEBUG` | Logs decisions to `~/.laya-claude.log`. |
 
 A value that is not a plain whole number in range is ignored and the default is used.
@@ -139,7 +186,7 @@ router and outlives the app being closed.
 
 ```bash
 npm install
-npm test                                  # 684 tests, about 90 s
+npm test                                  # 747 tests, about 90 s
 cd apps/LayaBar && swift test             # the app's tests
 LAYA_PYTHON=~/.laya-router/venv/bin/python npm run live-routing   # real weights, no key
 ```
