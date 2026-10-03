@@ -4,7 +4,7 @@
 // as the current model, ~5,600 tokens of context). Each row is [expected class, rubric mean].
 import test from "node:test";
 import assert from "node:assert/strict";
-import { SCORE_TIER } from "../src/config.mjs";
+import { SCORE_TIER, scoreTierFor } from "../src/config.mjs";
 
 const FIXTURE = [
   ["mechanical", 0.4228],
@@ -91,4 +91,25 @@ test("hard work is rarely sent below balanced, and never as far down as the fast
   const hard = FIXTURE.filter(([c]) => TIER[c] === 2);
   const belowBalanced = hard.filter(([, m]) => pick(m) < 1).length;
   assert.ok(belowBalanced <= 1, `${belowBalanced} of ${hard.length} hard prompts routed to the fast tier`);
+});
+
+// The presets on the same fixture. Measured when they were chosen (2026-10-03):
+//   savings  weak 0.416 strong 0.540: 24 to Opus, 11 under-routed, 59% right, 0 hard to Haiku
+//   balanced weak 0.396 strong 0.515: 31 to Opus,  4 under-routed, 69% right, 0 hard to Haiku
+//   careful  weak 0.376 strong 0.490: 39 to Opus,  2 under-routed, 66% right, 0 hard to Haiku
+const byPreset = (preset) => {
+  const t = scoreTierFor(preset);
+  const at = (m) => (m < t.weakFloor ? 0 : m < t.strongFloor ? 1 : 2);
+  return {
+    opus: FIXTURE.filter(([, m]) => at(m) === 2).length,
+    under: FIXTURE.filter(([c, m]) => at(m) < TIER[c]).length,
+    hardToHaiku: FIXTURE.filter(([c, m]) => TIER[c] === 2 && at(m) === 0).length,
+  };
+};
+
+test("presets: savings sends less to Opus, careful under-routes less, and none sends hard work to Haiku", () => {
+  const [s, b, c] = ["savings", "balanced", "careful"].map(byPreset);
+  assert.ok(s.opus < b.opus && b.opus < c.opus, JSON.stringify({ s, b, c }));
+  assert.ok(c.under <= b.under && b.under < s.under, JSON.stringify({ s, b, c }));
+  for (const p of [s, b, c]) assert.equal(p.hardToHaiku, 0);
 });

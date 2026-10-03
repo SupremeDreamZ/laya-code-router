@@ -1,4 +1,4 @@
-import { SCORE_TIER, EFFORT, DESIGN_WORK, TIER_NAMES, THRESHOLDS, OVERRIDE_PATTERNS, rankOf } from "./config.mjs";
+import { EFFORT, DESIGN_WORK, TIER_NAMES, THRESHOLDS, OVERRIDE_PATTERNS, rankOf, scoreTierFor } from "./config.mjs";
 import { pricesFor } from "./pricing.mjs";
 
 /** Design-shaped wording (architecture, migration, from scratch); see DESIGN_WORK. */
@@ -39,17 +39,19 @@ function clampToAvailable(tier, available) {
  *   mean score <  weakFloor    -> fast   (below-rubric noise band keeps the cheap tier)
  *   anything between           -> balanced (ordinary day-to-day engineering)
  */
-export function tierFromScores(metrics = {}) {
-  const parts = [metrics.taskComplexity, metrics.reasoningRequired, metrics.toolComplexity]
+export function tierFromScores(metrics = {}, preset = "balanced") {
+  const parts = [metrics?.taskComplexity, metrics?.reasoningRequired, metrics?.toolComplexity]
     .filter((v) => Number.isFinite(v));
   if (!parts.length) return null;
+  // The app's preset shifts the cuts (config.PRESET_OFFSETS); Balanced is SCORE_TIER itself.
+  const cuts = scoreTierFor(preset);
   const mean = parts.reduce((a, b) => a + b, 0) / parts.length;
-  if (mean >= SCORE_TIER.strongFloor) return "opus";
+  if (mean >= cuts.strongFloor) return "opus";
   // Haiku: the looser cut applies only when LAYA also says the work needs no investigation or
   // design. Without that answer, only the conservative floor is safe.
   const judgment = Number.isFinite(metrics.judgment) ? metrics.judgment : null;
-  if (judgment !== null && mean < SCORE_TIER.haikuCut && judgment < SCORE_TIER.judgmentVeto) return "haiku";
-  if (mean < SCORE_TIER.weakFloor) return "haiku";
+  if (judgment !== null && mean < cuts.haikuCut && judgment < cuts.judgmentVeto) return "haiku";
+  if (mean < cuts.weakFloor) return "haiku";
   return "sonnet";
 }
 
@@ -69,7 +71,7 @@ export function tierFromScores(metrics = {}) {
  * @param {number} input.contextTokens approximate size of the conversation so far
  * @returns {{tier: string, reason: string, changed: boolean}}
  */
-export function decide({ prompt, laya, current, available, contextTokens = 0, fresh = false }) {
+export function decide({ prompt, laya, current, available, contextTokens = 0, fresh = false, preset = "balanced" }) {
   const settle = (tier, reason) => {
     const final = clampToAvailable(tier, available) ?? current;
     const why = final === tier ? reason : `${reason}+unavailable`;
@@ -81,7 +83,7 @@ export function decide({ prompt, laya, current, available, contextTokens = 0, fr
 
   if (!laya) return settle(current, "laya-unavailable");
 
-  let target = tierFromScores(laya.metrics);
+  let target = tierFromScores(laya.metrics, preset);
   if (!target) return settle(current, "laya-unavailable");
   // Design-shaped work is never the cheap tier, whatever LAYA scored; it only moves work up.
   if (target === "haiku" && isDesignWork(prompt)) target = "sonnet";
@@ -142,11 +144,11 @@ export function stepCost({ current, target, contextTokens, step, horizon = THRES
  *
  * @returns {{tier: string, switched: boolean, reason: string, target?: string, saving: number, rebuild: number}}
  */
-export function decideStep({ prompt, laya, current, available, contextTokens = 0, step, hazard = () => null }) {
+export function decideStep({ prompt, laya, current, available, contextTokens = 0, step, hazard = () => null, preset = "balanced" }) {
   const none = { saving: 0, rebuild: 0 };
   const stay = (reason, extra = none) => ({ tier: current, switched: false, reason, ...extra });
   if (!laya) return stay("step-laya-unavailable");
-  let target = tierFromScores(laya.metrics);
+  let target = tierFromScores(laya.metrics, preset);
   if (!target) return stay("step-laya-unavailable");
   if (target === "haiku" && isDesignWork(prompt)) target = "sonnet";
   target = clampToAvailable(target, available) ?? current;

@@ -259,6 +259,20 @@ test("prefs: a tier switched off is never chosen, and work steps up instead", as
   assert.equal(upstream.seen[0].model, "claude-sonnet-5-5", "would have been Haiku, so it stepped up");
 });
 
+test("prefs: the preset chosen in the app changes where the same scores land", async (t) => {
+  const route = async () => ({ metrics: { taskComplexity: 0.53, reasoningRequired: 0.53, toolComplexity: 0.53, judgment: 0.3 }, confidence: 0.4, ms: 1, request: {}, response: {} });
+  const landing = {};
+  for (const preset of ["savings", "balanced", "careful"]) {
+    await withPrefs(t, mergePrefs(defaultPrefs(), { preset }));
+    const upstream = stubUpstream({ usage: { input_tokens: 5, output_tokens: 1 } });
+    await upstream.listen();
+    const h = await withProxy(t, { upstream, route });
+    await askTurn(h.port, `Refactor the retry helper (${preset}).`);
+    landing[preset] = upstream.seen[0].model;
+  }
+  assert.deepEqual(landing, { savings: "claude-sonnet-5-5", balanced: "claude-opus-5-5", careful: "claude-opus-5-5" });
+});
+
 test("prefs: effort off leaves the level Claude Code chose", async (t) => {
   await withPrefs(t, mergePrefs(defaultPrefs(), { effortAuto: false }));
   const upstream = stubUpstream({ usage: { input_tokens: 5, output_tokens: 1 } });

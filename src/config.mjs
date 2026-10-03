@@ -240,6 +240,36 @@ export const SCORE_TIER = {
   judgmentVeto: 0.45,
 };
 
+/**
+ * What the app's preset does: a fixed shift of the three cuts. "Save most" (savings) raises the
+ * Opus floor and both Haiku cuts, so the same scores land cheaper; "Careful" lowers them; Balanced
+ * is the calibrated numbers above, exactly.
+ *
+ * Not a fit. The sizes come from the calibration notes: the leave-one-out fits moved the lower cut
+ * by 0.02, so a 0.02 shift of the Haiku cuts is one unit of the calibration's own uncertainty. The
+ * Opus floor moves 0.025, which keeps savings' floor (0.54) below the score that earns Opus high
+ * effort (EFFORT.opusHighMean, 0.55): work scored hard enough for that still reaches Opus under
+ * every preset. On the 58-prompt fixture
+ * (calibration.test.mjs) that sends 24 / 31 / 39 prompts to Opus, under-routes 11 / 4 / 2, and sends
+ * no hard prompt to Haiku under any preset. `judgmentVeto` never moves: it is what keeps
+ * unknown-cause debugging and design work off Haiku, and no preset should trade that away.
+ */
+export const PRESET_OFFSETS = {
+  savings: { strongFloor: 0.025, haikuCut: 0.02, weakFloor: 0.02 },
+  balanced: { strongFloor: 0, haikuCut: 0, weakFloor: 0 },
+  careful: { strongFloor: -0.025, haikuCut: -0.02, weakFloor: -0.02 },
+};
+
+/** SCORE_TIER for a preset. Anything that is not a known preset is Balanced. */
+export function scoreTierFor(preset) {
+  const offsets = PRESET_OFFSETS[preset];
+  if (!offsets || preset === "balanced") return SCORE_TIER;
+  const shifted = { ...SCORE_TIER };
+  // Rounded so 0.515 + 0.025 is 0.54, not 0.5400000000000001.
+  for (const [key, by] of Object.entries(offsets)) shifted[key] = Math.round((SCORE_TIER[key] + by) * 1000) / 1000;
+  return shifted;
+}
+
 /** Phrases that mean "the human already decided", checked against the raw prompt. */
 export const OVERRIDE_PATTERNS = TIERS.map((t) => ({
   tier: t.name,

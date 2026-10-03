@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { startProxy } from "./proxy.mjs";
 import { startCodexProxy } from "./codex-proxy.mjs";
 import { sidecarTracker, warmSidecar } from "./router.mjs";
-import { EFFORT, SCORE_TIER, TIERS } from "./config.mjs";
+import { EFFORT, TIERS, scoreTierFor } from "./config.mjs";
 import { ENGINES, loadPrefs, mergePrefs, savePrefs, HOME_DIR } from "./prefs.mjs";
 import { createLedger } from "./usage.mjs";
 import { costOf, pricesFor } from "./pricing.mjs";
@@ -209,7 +209,8 @@ class Controller {
       sidecar: { state: this.sidecarState.state, since: this.sidecarSince, lastError: this.sidecarState.error },
       tiers: this.tiers(),
       usage,
-      thresholds: { ...SCORE_TIER, effort: EFFORT },
+      // The cuts routing uses now, which the preset shifts (Balanced is SCORE_TIER itself).
+      thresholds: { ...scoreTierFor(this.prefs.preset), effort: EFFORT },
       models: TIERS.map((t) => ({ tier: t.name, id: t.id, thinking: t.thinking, effort: t.effort })),
       events: this.events.slice(-120),
       now,

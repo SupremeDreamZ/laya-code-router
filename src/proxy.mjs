@@ -498,6 +498,7 @@ export async function startProxy({
                 available: allowed,
                 contextTokens,
                 fresh: freshSession,
+                preset: prefs?.preset,
               }));
               state.freshNext = false;
               // A new turn starts its own count of tool-loop steps, and a tier the user named for
@@ -566,6 +567,7 @@ export async function startProxy({
                   contextTokens,
                   step: size,
                   hazard: (target) => stepHazard(body, modelForTier(models, target)),
+                  preset: prefs?.preset,
                 });
                 reason = d.reason;
                 if (d.switched) {

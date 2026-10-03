@@ -305,3 +305,68 @@ test("design work: it never moves work down, and an explicit override still wins
   const cheap = { metrics: { taskComplexity: 0.457, reasoningRequired: 0.457, toolComplexity: 0.457, judgment: 0.199 }, confidence: 0.3 };
   assert.equal(decide({ prompt: "use haiku: design a billing system", laya: cheap, current: "opus", available: ALL, fresh: true }).tier, "haiku");
 });
+
+
+// Presets. "Save most" tries the cheap model first and "Careful" sends more work to the strong one
+// (the app's own words). Each moves the cuts by a fixed offset; Balanced is the calibrated numbers
+// exactly. Measured on the 58-prompt calibration fixture (calibration.test.mjs), the shipped
+// offsets send 24 / 31 / 39 of 58 prompts to Opus (savings / balanced / careful) and no hard
+// prompt to Haiku under any of them.
+import { scoreTierFor, PRESET_OFFSETS } from "../src/config.mjs";
+import { decideStep } from "../src/policy.mjs";
+
+test("presets: balanced is today's calibrated cuts exactly, and an unknown preset is balanced", () => {
+  assert.deepEqual(scoreTierFor("balanced"), SCORE_TIER);
+  assert.deepEqual(scoreTierFor(undefined), SCORE_TIER);
+  assert.deepEqual(scoreTierFor("reckless"), SCORE_TIER);
+  for (const m of [0.3, 0.396, 0.45, 0.48, 0.5, 0.515, 0.6]) {
+    for (const j of [null, 0.1, 0.6]) {
+      const metrics = withJudgment(m, j);
+      assert.equal(tierFromScores(metrics, "balanced"), tierFromScores(metrics), `${m}/${j}`);
+    }
+  }
+});
+
+test("presets: savings raises the Opus floor and the Haiku cuts, careful lowers them", () => {
+  const s = scoreTierFor("savings");
+  const c = scoreTierFor("careful");
+  for (const key of ["strongFloor", "haikuCut", "weakFloor"]) {
+    assert.ok(s[key] > SCORE_TIER[key], `savings ${key}`);
+    assert.ok(c[key] < SCORE_TIER[key], `careful ${key}`);
+  }
+  assert.equal(s.judgmentVeto, SCORE_TIER.judgmentVeto, "the veto that keeps unknown-cause work off Haiku never moves");
+  assert.equal(c.judgmentVeto, SCORE_TIER.judgmentVeto);
+  assert.deepEqual(PRESET_OFFSETS.balanced, { strongFloor: 0, haikuCut: 0, weakFloor: 0 });
+  // Every preset keeps the bands in order.
+  for (const t of [s, c]) assert.ok(t.weakFloor < t.haikuCut && t.haikuCut < t.strongFloor);
+});
+
+test("presets: the same scores land cheaper under savings and stronger under careful", () => {
+  assert.equal(tierFromScores(withJudgment(0.53, 0.3), "balanced"), "opus");
+  assert.equal(tierFromScores(withJudgment(0.53, 0.3), "savings"), "sonnet");
+  assert.equal(tierFromScores(withJudgment(0.5, 0.3), "balanced"), "sonnet");
+  assert.equal(tierFromScores(withJudgment(0.5, 0.3), "careful"), "opus");
+  assert.equal(tierFromScores(withJudgment(0.49, 0.1), "balanced"), "sonnet");
+  assert.equal(tierFromScores(withJudgment(0.49, 0.1), "savings"), "haiku");
+  assert.equal(tierFromScores(withJudgment(0.47, 0.1), "balanced"), "haiku");
+  assert.equal(tierFromScores(withJudgment(0.47, 0.1), "careful"), "sonnet");
+  // Without a judgment answer, the conservative floor moves the same way.
+  const blend = (m) => ({ taskComplexity: m, reasoningRequired: m, toolComplexity: m });
+  assert.equal(tierFromScores(blend(0.41), "savings"), "haiku");
+  assert.equal(tierFromScores(blend(0.41), "balanced"), "sonnet");
+  assert.equal(tierFromScores(blend(0.385), "careful"), "sonnet");
+});
+
+test("presets: decide and decideStep both use the preset they are given", () => {
+  const laya = { metrics: withJudgment(0.53, 0.3), confidence: 0.5 };
+  assert.equal(decide({ ...base, current: "haiku", laya, preset: "savings" }).tier, "sonnet");
+  assert.equal(decide({ ...base, current: "haiku", laya }).tier, "opus");
+  const step = { prompt: "Next step of an ongoing task:\nBash: ls", available: ALL, contextTokens: 1000, step: { input: 0, output: 0 } };
+  assert.equal(decideStep({ ...step, laya, current: "sonnet", preset: "savings" }).switched, false);
+  assert.equal(decideStep({ ...step, laya, current: "sonnet" }).tier, "opus");
+});
+
+test("presets: a design-shaped prompt still never reaches Haiku under savings", () => {
+  const laya = { metrics: withJudgment(0.49, 0.1), confidence: 0.5 };
+  assert.equal(decide({ ...base, prompt: "Design a billing system.", current: "opus", fresh: true, laya, preset: "savings" }).tier, "sonnet");
+});
