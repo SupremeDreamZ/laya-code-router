@@ -5,7 +5,7 @@
 // process on this Mac cannot read a routing history or change a setting without that token.
 import { connect, createServer } from "node:net";
 import { spawn } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { startProxy } from "./proxy.mjs";
@@ -541,7 +541,11 @@ function startControl() {
     server.listen(CONTROL_PORT, "127.0.0.1", () => {
       const info = { token, port: CONTROL_PORT, pid: process.pid, startedAt: Date.now(), root: ROOT };
       mkdirSync(HOME_DIR(), { recursive: true, mode: 0o700 });
-      writeFileSync(RUN_FILE, JSON.stringify(info), { mode: 0o600 });
+      // Written whole and renamed into place: the launcher, the guard hook and the file tool read
+      // this file at any moment, and a half-written one parsed as an error (seen in the test suite).
+      const tmp = `${RUN_FILE}.${process.pid}.tmp`;
+      writeFileSync(tmp, JSON.stringify(info), { mode: 0o600 });
+      renameSync(tmp, RUN_FILE);
       controller.publish();
       resolve(info);
     });
