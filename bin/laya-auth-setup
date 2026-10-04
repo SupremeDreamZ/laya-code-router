@@ -1,0 +1,17 @@
+#!/bin/zsh
+# One-time local sign-in for LAYA: runs `claude setup-token` (a long-lived token, about a year,
+# never refreshed) and saves it to the macOS Keychain item `laya-router-token`, where the LAYA
+# proxy reads it for local apps that send the placeholder key `laya-local` (for example Hermes).
+# The token is shown only in this terminal by Claude Code itself and is never written to a file.
+set -u
+print "LAYA sign-in: a browser window opens for your Claude account. Approve it, then come back here."
+out=$(claude setup-token 2>&1 | tee /dev/tty)
+tok=$(print -r -- "$out" | grep -oE 'sk-ant-oat[0-9A-Za-z_-]+' | tail -1)
+if [[ -z $tok ]]; then
+  print -u2 "\nNo token found in the output. If Claude Code printed one, copy it and run:"
+  print -u2 "  security add-generic-password -U -a \"$USER\" -s laya-router-token -w"
+  print -u2 "(it asks you to paste the token, and does not show it)"
+  exit 1
+fi
+security add-generic-password -U -a "$USER" -s laya-router-token -w "$tok" \
+  && print "\nSaved to the Keychain as laya-router-token. LAYA uses it automatically. You can close this window."

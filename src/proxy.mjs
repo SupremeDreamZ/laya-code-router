@@ -30,6 +30,7 @@ import {
   EFFORT_BETA,
 } from "./wire.mjs";
 import { log } from "./log.mjs";
+import { applyLocalAuth, MISSING_MESSAGE } from "./localauth.mjs";
 import { createUsageTap, decoderFor, readableEncodings } from "./usage.mjs";
 import { parseLimitHeaders, loadLimits, paceCapActive } from "./limits.mjs";
 import { PREFS_FILE, defaultPrefs, mergePrefs } from "./prefs.mjs";
@@ -878,6 +879,12 @@ export async function startProxy({
       const target = new URL(upstreamURL);
       const transport = target.protocol === "http:" ? http : https;
       const headers = { ...req.headers, host: target.host };
+      // Local apps (Hermes) send the placeholder key; swap it for this machine's long-lived token.
+      if (applyLocalAuth(headers) === "missing") {
+        res.writeHead(401, { "content-type": "application/json" });
+        res.end(JSON.stringify({ type: "error", error: { type: "authentication_error", message: MISSING_MESSAGE } }));
+        return;
+      }
       delete headers["content-length"];
       // The launcher's own switch, meant for this proxy only.
       delete headers[STEP_HEADER];
