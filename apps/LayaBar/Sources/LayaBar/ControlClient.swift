@@ -131,6 +131,8 @@ struct Snapshot: Decodable, Equatable {
             var cost: Double
             var baseline: Double
             var byTier: [String: TierTotals]?
+            /// Prompt tokens trimmed today (old tool results). Absent from an older daemon.
+            var trimmed: Double?
         }
         struct Point: Decodable, Equatable {
             var date: String

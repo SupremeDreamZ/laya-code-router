@@ -273,7 +273,7 @@ function handle(action, arg) {
     case "engine.stop":
       return stopEngine(engineArg(arg));
     case "event": {
-      const { kind, tier, model, effort, effortReason, reason, usage, prompt, ms, confidence, session, class: cls, step, status } = arg ?? {};
+      const { kind, tier, model, effort, effortReason, reason, usage, prompt, ms, confidence, session, class: cls, step, status, cleared } = arg ?? {};
       const at = Date.now();
       const entry = {
         at,
@@ -298,6 +298,8 @@ function handle(action, arg) {
         // The token counts travel with the event, so the app can show them and the ledger can
         // price the turn without a second call into the proxy.
         usage: usage ?? null,
+        // Old tool results the API trimmed from this request's prompt (src/trim.mjs), when it did.
+        ...(cleared ? { cleared } : {}),
         // Priced here, from the same table the ledger uses, so the number on a decision card can
         // never disagree with the day's total. The app displays it and does no arithmetic of its own.
         ...(usage ? { cost: costOf(usage, pricesFor(model, tier)) } : {}),
@@ -305,7 +307,7 @@ function handle(action, arg) {
       // One place records, one place totals: an event and its cost can never disagree.
       controller.record(entry);
       if (usage) {
-        controller.ledger.record({ tier, model, usage, routed: kind === "routed" });
+        controller.ledger.record({ tier, model, usage, routed: kind === "routed", cleared });
       }
       controller.publish();
       return null;

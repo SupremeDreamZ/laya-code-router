@@ -383,3 +383,18 @@ test("an event with no usage has no cost, rather than a guessed one", async (t) 
   const e = (await d.snap()).events.at(-1);
   assert.equal(e.cost, undefined);
 });
+
+test("what the API trimmed reaches the app's feed and today's total", async (t) => {
+  // The daemon rebuilds every event from a list of fields; one left off that list never shows.
+  const up = await anthropic();
+  t.after(() => up.close());
+  const d = await boot(t, { up, ...dirs() });
+  const usage = { input: 2, cacheWrite: 100, cacheRead: 30000, output: 10 };
+  const before = (await d.snap()).usage.today.trimmed ?? 0;
+  await d.call("event", { kind: "routed", tier: "sonnet", model: "claude-sonnet-5-5", usage, cleared: { tokens: 15562, toolUses: 3 } });
+  await d.call("event", { kind: "routed", tier: "sonnet", model: "claude-sonnet-5-5", usage });
+  const s = await d.snap();
+  assert.deepEqual(s.events.at(-2).cleared, { tokens: 15562, toolUses: 3 });
+  assert.equal(s.events.at(-1).cleared, undefined);
+  assert.equal(s.usage.today.trimmed - before, 15562);
+});

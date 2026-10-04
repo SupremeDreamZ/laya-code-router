@@ -197,7 +197,7 @@ export function createLedger({ file = USAGE_FILE(), now = Date.now, baselineTier
      * `routed` false means the router did not choose this turn (paused, or background work);
      * its baseline is its own cost, so it can never inflate the savings figure.
      */
-    record({ tier, model, usage, routed = true }) {
+    record({ tier, model, usage, routed = true, cleared = null }) {
       const at = now();
       const day = (data.days[dayKey(at)] ??= BLANK_DAY());
       if (!day.base) {
@@ -223,6 +223,8 @@ export function createLedger({ file = USAGE_FILE(), now = Date.now, baselineTier
       t.cost += cost;
       day.n += 1;
       day.cost += cost;
+      // Prompt tokens the API trimmed (old tool results), counted per request it applied to.
+      if (cleared?.tokens > 0) day.trimmed = (day.trimmed ?? 0) + cleared.tokens;
       prune();
       schedule();
     },
@@ -230,7 +232,9 @@ export function createLedger({ file = USAGE_FILE(), now = Date.now, baselineTier
     snapshot(days = 7) {
       const at = now();
       const found = data.days[dayKey(at)];
-      const today = found ? { ...found, baseline: baselineOf(found) } : { n: 0, cost: 0, baseline: 0, byTier: {} };
+      const today = found
+        ? { ...found, baseline: baselineOf(found), trimmed: found.trimmed ?? 0 }
+        : { n: 0, cost: 0, baseline: 0, byTier: {}, trimmed: 0 };
       const series = [];
       for (let i = days - 1; i >= 0; i--) {
         const key = dayKey(at - i * 86400000);

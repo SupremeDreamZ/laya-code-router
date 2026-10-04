@@ -250,6 +250,13 @@ struct Spend: View {
                     .foregroundStyle(Theme.faint)
                     .lineLimit(1)
                 Spacer(minLength: 0)
+                if let t = usage.today.trimmed, t > 0 {
+                    Text("\(EventRow.tokens(t)) tokens trimmed")
+                        .font(Theme.Face.micro)
+                        .foregroundStyle(Theme.faint)
+                        .lineLimit(1)
+                        .help("Old tool results the API cleared from long prompts today, summed over requests")
+                }
             }
             if usage.series.contains(where: { $0.n > 0 }) {
                 Sparkline(points: usage.series.map { ($0.baseline - $0.cost) })

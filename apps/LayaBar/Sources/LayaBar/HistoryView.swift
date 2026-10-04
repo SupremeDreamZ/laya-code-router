@@ -104,7 +104,8 @@ struct EventRow: View {
     }
 
     static func tokens(_ n: Double) -> String {
-        n >= 1000 ? "\(Int((n / 1000).rounded()))k" : "\(Int(n))"
+        if n >= 1_000_000 { return String(format: "%.1fM", n / 1_000_000) }
+        return n >= 1000 ? "\(Int((n / 1000).rounded()))k" : "\(Int(n))"
     }
 
     private func clock(_ at: Double) -> String {

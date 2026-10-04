@@ -197,3 +197,12 @@ test("ledger: only the last 120 days are kept", () => {
   }
   assert.equal(l.snapshot().all.n, 120);
 });
+
+test("ledger: trimmed tokens add up per day and start at zero", () => {
+  const l = createLedger({ file: join(tmp(), "u.json"), baselineTier: () => "opus" });
+  assert.equal(l.snapshot().today.trimmed, 0);
+  l.record({ tier: "sonnet", model: "claude-sonnet-5-5", usage: usage({ cacheRead: 1 }), cleared: { tokens: 1000, toolUses: 2 } });
+  l.record({ tier: "sonnet", model: "claude-sonnet-5-5", usage: usage({ cacheRead: 1 }), cleared: { tokens: 500, toolUses: 1 } });
+  l.record({ tier: "sonnet", model: "claude-sonnet-5-5", usage: usage({ cacheRead: 1 }) });
+  assert.equal(l.snapshot().today.trimmed, 1500);
+});
