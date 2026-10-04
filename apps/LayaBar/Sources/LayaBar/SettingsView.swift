@@ -58,6 +58,12 @@ struct SettingsView: View {
                     , set: { client.update(.init(effortAuto: $0)) }, isOn: prefs.effortAuto)
 
                     ToggleRow(
+                        icon: "person.2",
+                        title: "Route sub-agents too",
+                        subtitle: "Laya scores each sub-agent's task and picks its model and effort, even when the main agent named a model for it. Words in the task such as \"use opus\" still win. Off means a named model is kept."
+                    , set: { client.update(.init(routeSubagents: $0)) }, isOn: prefs.routeSubagentsOn)
+
+                    ToggleRow(
                         icon: "scissors",
                         title: "Trim old tool results",
                         subtitle: "In long tool loops past about 120k tokens, old file contents and command output are cleared from the prompt in large steps, keeping the latest 8 whole. The model can re-read anything it needs."

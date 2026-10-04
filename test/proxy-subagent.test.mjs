@@ -48,14 +48,14 @@ async function harness(t, route) {
     close();
     upstream.close();
   });
-  const send = async (messages, cls) => {
+  const send = async (messages, cls, model = "laya-router") => {
     const headers = { "content-type": "application/json", "x-claude-code-session-id": SESSION };
     if (cls === "agent-id") headers["x-claude-code-agent-id"] = "agent-1";
     else if (cls) headers["x-claude-code-request-class"] = cls;
     const res = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ model: "laya-router", max_tokens: 1000, tools: TOOLS, metadata, messages }),
+      body: JSON.stringify({ model, max_tokens: 1000, tools: TOOLS, metadata, messages }),
     });
     await res.text();
     return seen.at(-1).model;
@@ -129,4 +129,44 @@ test("every routed event says which kind of conversation it served", async (t) =
   await h.send(loop(MAIN));
   const routed = h.events.filter((e) => e.kind === "routed");
   assert.deepEqual(routed.map((e) => e.class), ["main", "subagent", "subagent", "main"]);
+});
+
+
+// A parent agent that names a model for its sub-agent (measured: a worker told "use opus" did, and
+// 74 of 78 requests skipped routing) is guessing, not deciding. The sub-agent is routed like any other.
+test("a sub-agent its parent pinned to a model is still scored by LAYA and routed", async (t) => {
+  const h = await harness(t, scoreFor);
+  await h.send(MAIN, "main");
+  assert.equal(await h.send(SUB, "subagent", "claude-opus-5-5"), "claude-haiku-4-5-20251001", "a lookup task goes to Haiku whatever the parent named");
+  assert.equal(h.asked.at(-1), SUB[0].content[0].text);
+  assert.equal(h.events.at(-1).kind, "routed");
+  assert.equal(h.events.at(-1).class, "subagent");
+  assert.equal(await h.send(loop(SUB), "subagent", "claude-opus-5-5"), "claude-haiku-4-5-20251001", "and its tool loop stays on the routed tier");
+  assert.equal(h.asked.length, 2, "the loop is not re-scored");
+});
+
+test("a model the user picks for their own turn is still never changed", async (t) => {
+  const h = await harness(t, scoreFor);
+  assert.equal(await h.send(SUB, "main", "claude-opus-5-5"), "claude-opus-5-5");
+  assert.equal(h.asked.length, 0);
+  assert.equal(h.events.at(-1).kind, "manual");
+});
+
+test("a pinned sub-agent that LAYA cannot score keeps the model its parent named", async (t) => {
+  const h = await harness(t, () => null);
+  assert.equal(await h.send(SUB, "subagent", "claude-sonnet-5-5"), "claude-sonnet-5-5");
+});
+
+test("explicit words in the sub-agent's own task still win", async (t) => {
+  const h = await harness(t, scoreFor);
+  const task = [text("Use opus for this task: find every file that imports the session store.")];
+  assert.equal(await h.send(task, "subagent", "claude-haiku-4-5-20251001"), "claude-opus-5-5");
+});
+
+test("with the setting off, a pinned sub-agent passes through as before", async (t) => {
+  process.env.LAYA_ROUTE_SUBAGENTS = "0";
+  t.after(() => delete process.env.LAYA_ROUTE_SUBAGENTS);
+  const h = await harness(t, scoreFor);
+  assert.equal(await h.send(SUB, "subagent", "claude-opus-5-5"), "claude-opus-5-5");
+  assert.equal(h.asked.length, 0);
 });

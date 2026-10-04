@@ -69,6 +69,13 @@ LAYA scores that task and the sub-agent keeps the result for its whole tool loop
 changes the main conversation's model. If LAYA cannot answer, the sub-agent runs on whatever the main
 conversation is running on. Claude Code's background calls (titles, summaries) still go to Haiku.
 
+This holds even when the main agent names a model for its sub-agent (the Agent tool's `model`
+setting). That name is the agent's habit, not your decision: measured, a worker told "use opus"
+pinned its sub-agent to Opus and 74 of its 78 requests skipped routing. Such a sub-agent is scored
+like any other, and if LAYA cannot answer it keeps the model it was named. Words in the sub-agent's
+own task ("use opus") still win, and a model you pick for your own turn is never changed. Turn it off
+with "Route sub-agents too" in Settings or `LAYA_ROUTE_SUBAGENTS=0`.
+
 ### Trimming old tool results
 
 Long tool loops re-read their whole history on every step. On this router's own log every session

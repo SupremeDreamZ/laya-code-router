@@ -382,6 +382,16 @@ export function trimOn(prefs, env = process.env) {
   return prefs?.trimToolResults !== false;
 }
 
+/**
+ * Whether a sub-agent the parent pinned to a model is routed anyway. `LAYA_ROUTE_SUBAGENTS=1`/`0`
+ * decides outright; otherwise the app's setting, on by default.
+ */
+export function subagentRoutingOn(prefs, env = process.env) {
+  if (env.LAYA_ROUTE_SUBAGENTS === "1") return true;
+  if (env.LAYA_ROUTE_SUBAGENTS === "0") return false;
+  return prefs?.routeSubagents !== false;
+}
+
 function readPrefs() {
   if (process.env.LAYA_DISABLE_PREFS === "1") return null;
   try {
@@ -508,7 +518,13 @@ export async function startProxy({
           // Anything that is not the sentinel is a model the user chose, and an explicit
           // choice beats the router. That also covers Claude Code's own cheap Haiku calls
           // for titles and summaries, which must never be pinned up to the session's tier.
-          if (!isAuto(body.model)) {
+          // A sub-agent whose parent named a model for it is routed like any other: the name is the
+          // parent agent's guess, not the user's choice (measured: a worker told "use opus" pinned
+          // its sub-agent to Opus and 74 of 78 requests skipped routing). Turned off, the old rule
+          // holds and a named model is never changed. Explicit text in the task ("use opus") still wins.
+          const routePinnedSubagent =
+            !isAuto(body.model) && requestClass(req.headers) === "subagent" && tierOf(body.model) && subagentRoutingOn(readPrefs());
+          if (!isAuto(body.model) && !routePinnedSubagent) {
             debug(`passthrough, user selected ${body.model}`);
             // Only a real agent turn reflects the user's choice. Claude Code's own auxiliary
             // calls carry no tools and must not flip the status line to manual mid-session.
@@ -554,7 +570,13 @@ export async function startProxy({
             const humanTurn = cls === undefined || cls === "main" || subagent;
             // A sub-agent with no tier of its own yet stands on its parent's, so a sub-agent that
             // LAYA cannot score runs on what the main conversation runs on.
-            const parent = subagent && !state.tier ? parents.get(session) : undefined;
+            // A pinned sub-agent that LAYA cannot score keeps the model its parent named for it.
+            const parent =
+              subagent && !state.tier
+                ? routePinnedSubagent
+                  ? { tier: tierOf(body.model), model: body.model }
+                  : parents.get(session)
+                : undefined;
             // What the prompt cache was built on, which is what a downgrade would discard.
             const current = state.tier ?? parent?.tier ?? "opus";
             const prompt = humanTurn ? newTurnPrompt(body) : null;

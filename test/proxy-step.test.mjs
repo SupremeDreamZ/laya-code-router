@@ -309,11 +309,11 @@ test("stepHazard: a model that checks thinking prefixes is refused when the prox
   assert.equal(stepHazard({ messages }, "claude-opus-5-5-folding-test", { checksPrefix: () => true, takesSystem: () => false }), "thinking-prefix-would-change");
 });
 
-test("a sub-agent its parent pinned to a model is not re-routed, but is trimmed and reported with its effort", async (t) => {
+test("with sub-agent routing off, a pinned sub-agent is not re-routed, but is trimmed and reported with its effort", async (t) => {
   // Measured: a worker told "use opus" spawned its sub-agent with model "opus", Claude Code then sent
   // claude-opus-5-5 outright, and every one of those requests skipped trimming and showed no effort.
   const big = { input_tokens: 2, cache_read_input_tokens: 150_000, output_tokens: 5 };
-  const { send, events, asked } = await harness(t, { route: async () => at(0.6), env: { LAYA_TRIM_JUMP: "3", LAYA_TRIM_KEEP: "1" }, usage: big });
+  const { send, events, asked } = await harness(t, { route: async () => at(0.6), env: { LAYA_TRIM_JUMP: "3", LAYA_TRIM_KEEP: "1", LAYA_ROUTE_SUBAGENTS: "0" }, usage: big });
   const pinned = { extra: { model: "claude-opus-5-5", output_config: { effort: "high" } }, cls: "subagent" };
   await send(loopOf(2), pinned);
   const second = await send(loopOf(5), pinned);

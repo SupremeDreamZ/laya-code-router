@@ -44,6 +44,11 @@ export const DEFAULT_PREFS = Object.freeze({
    */
   guard: false,
   /**
+   * Route sub-agents even when the parent agent named a model for them. On by default: an agent
+   * picks a model for its helper by habit, not measurement, and Laya scores the helper's task.
+   */
+  routeSubagents: true,
+  /**
    * Give routed sessions the laya_rank_files tool (bin/laya-mcp.mjs): rank files by a yes/no
    * question about their content without reading them. Off by default: it ranks, it does not
    * prove, and it takes about 1.5 s a file. Read when a session starts.
@@ -95,6 +100,7 @@ const SCHEMA = {
   effortSteps: (v) => (isBool(v) ? v : undefined),
   trimToolResults: (v) => (isBool(v) ? v : undefined),
   guard: (v) => (isBool(v) ? v : undefined),
+  routeSubagents: (v) => (isBool(v) ? v : undefined),
   rankFiles: (v) => (isBool(v) ? v : undefined),
   pausedTier: (v) => (oneOf(["haiku", "sonnet", "opus", "fable"])(v) ? v : undefined),
   baselineTier: (v) => (oneOf(["sonnet", "opus", "fable"])(v) ? v : undefined),

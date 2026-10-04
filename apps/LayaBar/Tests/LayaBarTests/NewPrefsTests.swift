@@ -10,6 +10,14 @@ final class NewPrefsTests: XCTestCase {
         XCTAssertTrue(p.trimOn)
         XCTAssertFalse(p.guardOn)
         XCTAssertFalse(p.rankFilesOn)
+        XCTAssertTrue(p.routeSubagentsOn)
+    }
+
+    func testRouteSubagentsPatchAndDecode() throws {
+        let p = try JSONDecoder().decode(Snapshot.Prefs.self, from: Data((base + #","routeSubagents":false}"#).utf8))
+        XCTAssertFalse(p.routeSubagentsOn)
+        let json = String(decoding: try JSONEncoder().encode(Snapshot.PrefsPatch(routeSubagents: false)), as: UTF8.self)
+        XCTAssertEqual(json, #"{"routeSubagents":false}"#)
     }
 
     func testGuardDecodesFromItsJSONName() throws {

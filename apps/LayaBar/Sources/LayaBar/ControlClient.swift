@@ -51,16 +51,18 @@ struct Snapshot: Decodable, Equatable {
         var trimToolResults: Bool?
         var guard_: Bool?
         var rankFiles: Bool?
+        var routeSubagents: Bool?
 
         enum CodingKeys: String, CodingKey {
             case enabled, preset, tiers, effortAuto, pausedTier, baselineTier, showPrompts, launch, alerts
-            case showUsageInMenuBar, trimToolResults, rankFiles
+            case showUsageInMenuBar, trimToolResults, rankFiles, routeSubagents
             case guard_ = "guard"
         }
 
         var trimOn: Bool { trimToolResults ?? true }
         var guardOn: Bool { guard_ ?? false }
         var rankFilesOn: Bool { rankFiles ?? false }
+        var routeSubagentsOn: Bool { routeSubagents ?? true }
         var alertPrefs: Alerts { alerts ?? .standard }
         var menuBarUsage: Bool { showUsageInMenuBar ?? false }
 
@@ -94,10 +96,11 @@ struct Snapshot: Decodable, Equatable {
         var trimToolResults: Bool?
         var guard_: Bool?
         var rankFiles: Bool?
+        var routeSubagents: Bool?
 
         enum CodingKeys: String, CodingKey {
             case enabled, preset, tiers, effortAuto, pausedTier, baselineTier, showPrompts, launch, alerts
-            case showUsageInMenuBar, trimToolResults, rankFiles
+            case showUsageInMenuBar, trimToolResults, rankFiles, routeSubagents
             case guard_ = "guard"
         }
 
