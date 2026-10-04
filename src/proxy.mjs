@@ -492,13 +492,28 @@ export async function startProxy({
             if (Array.isArray(body.tools)) {
               writeStatus(sessionOf(body), { manual: true, at: Date.now() });
             }
+            // A model named outright (by the user, or by an agent for its sub-agent) is never re-routed,
+            // but trimming is not a model choice: a pinned sub-agent is often the longest tool loop
+            // there is. Same held cut as a routed conversation (src/trim.mjs).
+            const pinnedCls = requestClass(req.headers);
+            if (Array.isArray(body.tools) && trimOn(readPrefs())) {
+              const pinnedState = stateFor(conversationKey(body));
+              convo = pinnedState;
+              trimBeta = addTrim(body, pinnedCls === "compaction" ? heldTrim(pinnedState, body) : planTrim(pinnedState, body));
+            }
             if (onEvent) {
               report = {
                 kind: "manual",
+                // main | subagent | ...: a sub-agent pinned by its parent reads differently from a user's pick.
+                class: pinnedCls === "subagent" ? "subagent" : pinnedCls ?? undefined,
                 model: body.model,
                 tier: tierOf(body.model) ?? null,
-                reason: "you chose this model",
+                // The level Claude Code sent with it, so the app can show it; the proxy does not change it.
+                effort: body.output_config?.effort ?? null,
+                effortReason: body.output_config?.effort ? "client-chosen" : null,
+                reason: pinnedCls === "subagent" ? "the agent chose this model for its sub-agent" : "you chose this model",
                 session: sessionOf(body),
+                ...(trimBeta ? { trim: true } : {}),
               };
             }
           } else {

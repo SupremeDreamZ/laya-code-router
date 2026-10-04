@@ -308,3 +308,24 @@ test("stepHazard: a model that checks thinking prefixes is refused when the prox
   assert.equal(stepHazard({ messages }, "claude-opus-5-5"), null, "Opus 5.5 takes system messages, nothing is rewritten");
   assert.equal(stepHazard({ messages }, "claude-opus-5-5-folding-test", { checksPrefix: () => true, takesSystem: () => false }), "thinking-prefix-would-change");
 });
+
+test("a sub-agent its parent pinned to a model is not re-routed, but is trimmed and reported with its effort", async (t) => {
+  // Measured: a worker told "use opus" spawned its sub-agent with model "opus", Claude Code then sent
+  // claude-opus-5-5 outright, and every one of those requests skipped trimming and showed no effort.
+  const big = { input_tokens: 2, cache_read_input_tokens: 150_000, output_tokens: 5 };
+  const { send, events, asked } = await harness(t, { route: async () => at(0.6), env: { LAYA_TRIM_JUMP: "3", LAYA_TRIM_KEEP: "1" }, usage: big });
+  const pinned = { extra: { model: "claude-opus-5-5", output_config: { effort: "high" } }, cls: "subagent" };
+  await send(loopOf(2), pinned);
+  const second = await send(loopOf(5), pinned);
+  assert.equal(second.body.model, "claude-opus-5-5", "the named model is kept");
+  assert.equal(second.body.output_config.effort, "high", "and so is the effort it was sent with");
+  const trim = second.body.context_management.edits.find((e) => e.type === "clear_tool_uses_20250919");
+  assert.ok(trim, "the long pinned loop is trimmed");
+  assert.match(second.headers["anthropic-beta"], /context-management-2025-06-27/);
+  assert.equal(asked.length, 0, "LAYA is never asked about a pinned request");
+  const e = events.at(-1);
+  assert.equal(e.kind, "manual");
+  assert.equal(e.class, "subagent");
+  assert.equal(e.effort, "high");
+  assert.match(e.reason, /sub-agent/);
+});
