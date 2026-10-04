@@ -181,8 +181,32 @@ def build_state(payload):
     )
 
 
+def typed(payload):
+    """Answer caller-written typed questions (the guard, the file inspector, compaction).
+
+    `questions` is {id: {type, instructions, criteria?}}. noul takes NO criteria key at all (a
+    string there crashes laya 0.3.x), so it is dropped here rather than trusted to every caller.
+    """
+    state = str(payload.get("state") or "")
+    questions = payload.get("questions") or {}
+    if not isinstance(questions, dict) or not questions:
+        raise ValueError("no questions")
+    clean = {}
+    for qid, q in questions.items():
+        if not isinstance(q, dict) or q.get("type") not in ("noul", "choice", "score"):
+            raise ValueError(f"question {qid}: type must be noul, choice or score")
+        item = {"type": q["type"], "instructions": str(q.get("instructions") or "")}
+        if q["type"] != "noul" and q.get("criteria") is not None:
+            item["criteria"] = q["criteria"]
+        clean[qid] = item
+    response = _get_router().predict(state, clean, model=_FORCED)
+    return {"id": payload.get("id"), "answers": response.get("answers", {})}
+
+
 def handle(payload):
     """Answer one routing request. Raises on any failure; caller reports it."""
+    if payload.get("op") == "typed":
+        return typed(payload)
     models = payload.get("models") or []
     if not models:
         raise ValueError("no models available")

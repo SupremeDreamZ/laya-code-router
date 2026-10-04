@@ -89,6 +89,17 @@ export function planTrim(state, body, settings = trimSettings()) {
   return cleared > 0 ? uses - cleared : null;
 }
 
+/**
+ * The cut as it stands, never moved: for Claude Code's compaction request, which repeats the whole
+ * conversation. The cache holds the trimmed prompt, so sending it untrimmed would miss the cache and
+ * re-write the full history at write price; with the same cut it reads what is cached.
+ */
+export function heldTrim(state, body) {
+  const cleared = state.trimmed ?? 0;
+  const uses = toolUsesIn(body);
+  return cleared > 0 && uses >= cleared ? uses - cleared : null;
+}
+
 /** The edit as the API takes it, clearing all but the last `keep` tool uses. */
 export function trimEdit(keep) {
   return {

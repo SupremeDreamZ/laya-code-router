@@ -37,6 +37,18 @@ export const DEFAULT_PREFS = Object.freeze({
    * the model no longer needs. Server-side, so Claude Code's own copy of the conversation is untouched.
    */
   trimToolResults: true,
+  /**
+   * The tool gate (src/guard.mjs): rules plus one Laya question before Bash and file writes in a
+   * routed session. Off by default: it adds a hook to every tool call, and a headless run it blocks
+   * has to find another way. Read when a session starts.
+   */
+  guard: false,
+  /**
+   * Give routed sessions the laya_rank_files tool (bin/laya-mcp.mjs): rank files by a yes/no
+   * question about their content without reading them. Off by default: it ranks, it does not
+   * prove, and it takes about 1.5 s a file. Read when a session starts.
+   */
+  rankFiles: false,
   /** What a session runs on while the router is off. */
   pausedTier: "opus",
   /** What the savings figure compares against. */
@@ -82,6 +94,8 @@ const SCHEMA = {
   stepRouting: (v) => (isBool(v) ? v : undefined),
   effortSteps: (v) => (isBool(v) ? v : undefined),
   trimToolResults: (v) => (isBool(v) ? v : undefined),
+  guard: (v) => (isBool(v) ? v : undefined),
+  rankFiles: (v) => (isBool(v) ? v : undefined),
   pausedTier: (v) => (oneOf(["haiku", "sonnet", "opus", "fable"])(v) ? v : undefined),
   baselineTier: (v) => (oneOf(["sonnet", "opus", "fable"])(v) ? v : undefined),
   showPrompts: (v) => (isBool(v) ? v : undefined),

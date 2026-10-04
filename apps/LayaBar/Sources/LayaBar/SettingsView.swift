@@ -64,6 +64,18 @@ struct SettingsView: View {
                     , set: { client.update(.init(trimToolResults: $0)) }, isOn: prefs.trimOn)
 
                     ToggleRow(
+                        icon: "shield.lefthalf.filled",
+                        title: "Guard risky commands",
+                        subtitle: "Before a shell command or a write to a secrets file, rules and one Laya question check it. Clear damage is blocked; anything Laya thinks is destructive asks you first, or is blocked in a headless run. Applies to sessions started after you turn it on."
+                    , set: { client.update(.init(guard_: $0)) }, isOn: prefs.guardOn)
+
+                    ToggleRow(
+                        icon: "doc.text.magnifyingglass",
+                        title: "File ranking tool",
+                        subtitle: "Gives sessions a tool that ranks files by a question about their content without reading them in. A ranking, not proof, about 1.5 s a file. Applies to sessions started after you turn it on."
+                    , set: { client.update(.init(rankFiles: $0)) }, isOn: prefs.rankFilesOn)
+
+                    ToggleRow(
                         icon: "text.quote",
                         title: "Show prompt text",
                         subtitle: "Keeps what you typed in the History list. It never leaves this Mac either way."

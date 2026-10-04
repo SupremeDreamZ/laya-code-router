@@ -34,7 +34,7 @@ import { createUsageTap, decoderFor, readableEncodings } from "./usage.mjs";
 import { parseLimitHeaders, loadLimits, paceCapActive } from "./limits.mjs";
 import { PREFS_FILE, defaultPrefs, mergePrefs } from "./prefs.mjs";
 import { writeDecision, writeStatus } from "./status.mjs";
-import { TRIM_BETA, addTrim, clearedOf, planTrim } from "./trim.mjs";
+import { TRIM_BETA, addTrim, clearedOf, heldTrim, planTrim } from "./trim.mjs";
 
 // Upstream the proxy forwards to. Defaults to first-party Anthropic, which is what a Claude
 // subscription login uses. Set LAYA_CLAUDE_UPSTREAM only to route through an Anthropic-dialect
@@ -767,9 +767,10 @@ export async function startProxy({
                 body.output_config.effort = state.effort;
               }
             }
-            // Old tool results, trimmed server-side in stable jumps once the prompt is large (src/trim.mjs). Not on
-            // Claude Code's compaction request, whose job is to summarise that very history.
-            if (cls !== "compaction" && trimOn(prefs)) trimBeta = addTrim(body, planTrim(state, body));
+            // Old tool results, trimmed server-side in stable jumps once the prompt is large (src/trim.mjs).
+            // Claude Code's compaction request gets the same cut without moving it, so it reads the
+            // cached prompt instead of re-writing the whole history.
+            if (trimOn(prefs)) trimBeta = addTrim(body, cls === "compaction" ? heldTrim(state, body) : planTrim(state, body));
             routedModel = model;
             if (onEvent) {
               report = {

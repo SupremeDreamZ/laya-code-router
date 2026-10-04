@@ -49,8 +49,18 @@ struct Snapshot: Decodable, Equatable {
         var showUsageInMenuBar: Bool?
         /// Optional so an older daemon still decodes; absent means on, the daemon's default.
         var trimToolResults: Bool?
+        var guard_: Bool?
+        var rankFiles: Bool?
+
+        enum CodingKeys: String, CodingKey {
+            case enabled, preset, tiers, effortAuto, pausedTier, baselineTier, showPrompts, launch, alerts
+            case showUsageInMenuBar, trimToolResults, rankFiles
+            case guard_ = "guard"
+        }
 
         var trimOn: Bool { trimToolResults ?? true }
+        var guardOn: Bool { guard_ ?? false }
+        var rankFilesOn: Bool { rankFiles ?? false }
         var alertPrefs: Alerts { alerts ?? .standard }
         var menuBarUsage: Bool { showUsageInMenuBar ?? false }
 
@@ -82,6 +92,14 @@ struct Snapshot: Decodable, Equatable {
         var alerts: AlertsPatch?
         var showUsageInMenuBar: Bool?
         var trimToolResults: Bool?
+        var guard_: Bool?
+        var rankFiles: Bool?
+
+        enum CodingKeys: String, CodingKey {
+            case enabled, preset, tiers, effortAuto, pausedTier, baselineTier, showPrompts, launch, alerts
+            case showUsageInMenuBar, trimToolResults, rankFiles
+            case guard_ = "guard"
+        }
 
         struct AlertsPatch: Encodable {
             struct WindowsPatch: Encodable {

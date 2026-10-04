@@ -10,7 +10,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { startProxy } from "./proxy.mjs";
 import { startCodexProxy } from "./codex-proxy.mjs";
-import { sidecarTracker, warmSidecar } from "./router.mjs";
+import { askTyped, sidecarTracker, warmSidecar } from "./router.mjs";
 import { EFFORT, TIERS, scoreTierFor } from "./config.mjs";
 import { ENGINES, loadPrefs, mergePrefs, savePrefs, HOME_DIR } from "./prefs.mjs";
 import { createLedger } from "./usage.mjs";
@@ -263,6 +263,12 @@ function handle(action, arg) {
       const a = controller.alerts.test();
       controller.publish();
       return a;
+    }
+    case "laya.ask": {
+      // Typed questions for local tools (the guard hook, the file inspector) on the model this
+      // daemon already holds warm, so none of them pays the ~40s load. Token-gated like every change.
+      const { state, questions } = arg ?? {};
+      return askTyped(String(state ?? "").slice(0, 4000), questions);
     }
     case "usage.reset":
       controller.ledger.reset();

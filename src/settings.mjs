@@ -54,13 +54,19 @@ export function headlessEnv(args = [], env = process.env) {
  * request reached the proxy. Only the proxy URL is pinned here. The file lives in a shared
  * temp directory, so it never carries a credential, and auth stays wherever the user keeps it.
  */
-export function sessionSettings({ baseURL, statusLineCommand } = {}) {
+export function sessionSettings({ baseURL, statusLineCommand, guardCommand } = {}) {
   // `effortLevel` sits below an explicit --effort / /effort / CLAUDE_CODE_EFFORT_LEVEL in Claude
   // Code's precedence, so it is a default the user can still override. Anthropic's documented
   // default for Opus 5.5 and Sonnet 5.5 is medium; with the sentinel model Claude Code would
   // otherwise send high (measured), and every routed request would spend more than a plain session.
   const settings = { env: { ANTHROPIC_BASE_URL: baseURL }, effortLevel: "medium" };
   if (statusLineCommand) settings.statusLine = { type: "command", command: statusLineCommand };
+  // The tool gate, when on: `--settings` hooks are added to the user's own, never replace them.
+  if (guardCommand) {
+    settings.hooks = {
+      PreToolUse: [{ matcher: "Bash|Write|Edit|MultiEdit|NotebookEdit", hooks: [{ type: "command", command: guardCommand, timeout: 10 }] }],
+    };
+  }
   return settings;
 }
 

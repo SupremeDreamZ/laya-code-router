@@ -10,6 +10,7 @@ import { warmSidecar } from "../src/router.mjs";
 import { AUTO_MODEL, routingEnabled } from "../src/config.mjs";
 import { readSavedModel, restoreSavedModel, sessionSettings, routerEnv, stepRoutingEnv, headlessEnv } from "../src/settings.mjs";
 import { LOG_FILE } from "../src/log.mjs";
+import { loadPrefs } from "../src/prefs.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = dirname(HERE);
@@ -63,6 +64,48 @@ function statusLineCommand() {
 }
 
 /**
+ * The tool gate's hook command, when it is on: `LAYA_GUARD=1`/`0` decides outright, otherwise the
+ * app's setting (off by default). Read once, when the session starts.
+ */
+function guardCommand() {
+  let on = false;
+  if (process.env.LAYA_GUARD === "1") on = true;
+  else if (process.env.LAYA_GUARD !== "0") {
+    try {
+      on = loadPrefs().guard === true;
+    } catch {
+      on = false;
+    }
+  }
+  return on ? `"${process.execPath}" "${join(HERE, "laya-guard.mjs")}"` : undefined;
+}
+
+/**
+ * `--mcp-config` args adding the laya_rank_files tool, when it is on (`LAYA_RANK_FILES=1`/`0`, else
+ * the app's setting, off by default). Added to the user's own MCP servers, never replacing them.
+ */
+function rankFilesArgs(port) {
+  let on = false;
+  if (process.env.LAYA_RANK_FILES === "1") on = true;
+  else if (process.env.LAYA_RANK_FILES !== "0") {
+    try {
+      on = loadPrefs().rankFiles === true;
+    } catch {
+      on = false;
+    }
+  }
+  if (!on) return [];
+  const file = join(tmpdir(), "laya-claude", `mcp-${port}.json`);
+  try {
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, JSON.stringify({ mcpServers: { laya: { command: process.execPath, args: [join(HERE, "laya-mcp.mjs")] } } }));
+  } catch {
+    return [];
+  }
+  return ["--mcp-config", file];
+}
+
+/**
  * `--settings` args for one session. One file per proxy port, because two `laya-claude`
  * sessions share a temp directory and each has its own proxy URL to pin. Passed as a file
  * rather than inline JSON: on Windows the args go through a shell, and a JSON string
@@ -74,7 +117,7 @@ function sessionSettingsArgs(port) {
     mkdirSync(dirname(file), { recursive: true });
     writeFileSync(
       file,
-      JSON.stringify(sessionSettings({ baseURL: `http://127.0.0.1:${port}`, statusLineCommand: statusLineCommand() })),
+      JSON.stringify(sessionSettings({ baseURL: `http://127.0.0.1:${port}`, statusLineCommand: statusLineCommand(), guardCommand: guardCommand() })),
     );
   } catch {
     return [];
@@ -224,12 +267,15 @@ if (routingEnabled()) {
   Object.assign(env, routerEnv(process.env));
   Object.assign(env, stepRoutingEnv(process.env));
   Object.assign(env, headlessEnv(args, env));
+  // A headless run has nobody to answer the gate's "ask", so there it denies instead.
+  if (args.some((a) => a === "-p" || a === "--print")) env.LAYA_GUARD_HEADLESS = "1";
   Object.assign(env, autoModelEnv());
   process.on("exit", () => {
     close();
     restoreSavedModel(savedModelBefore);
   });
   args.push(...sessionSettingsArgs(port));
+  args.push(...rankFilesArgs(port));
   if (process.env.LAYA_DEBUG && process.stdout.isTTY) {
     process.stderr.write(`[laya] routing decisions -> ${LOG_FILE}\n`);
   }

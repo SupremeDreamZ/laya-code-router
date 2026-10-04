@@ -60,16 +60,17 @@ struct EventRow: View {
             withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) { open.toggle() }
         } label: {
             HStack(alignment: .top, spacing: Theme.Space.sm) {
-                Image(systemName: Theme.glyph(e.tier ?? ""))
+                Image(systemName: e.kind == "guard" ? "shield.lefthalf.filled" : Theme.glyph(e.tier ?? ""))
                     .font(.system(size: 11))
-                    .foregroundStyle(Theme.tier(e.tier))
+                    .foregroundStyle(e.kind == "guard" ? Theme.inkSoft : Theme.tier(e.tier))
                     .frame(width: 14)
                     .padding(.top, 1)
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: Theme.Space.sm) {
-                        Text(Theme.label(e.tier ?? "?"))
+                        Text(e.kind == "guard" ? (e.reason ?? "Guard") : Theme.label(e.tier ?? "?"))
                             .font(Theme.Face.micro)
-                            .foregroundStyle(Theme.tier(e.tier))
+                            .foregroundStyle(e.kind == "guard" ? Theme.inkSoft : Theme.tier(e.tier))
+                            .lineLimit(1)
                         if let effort = e.effort {
                             Text("effort \(effort)")
                                 .font(Theme.Face.micro)

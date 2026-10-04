@@ -84,6 +84,29 @@ the last move left. Clearing a little more on every step broke the cache on ever
 measured. `node test/live-trim.mjs` shows the difference on a real run. Turn it off in Settings
 ("Trim old tool results"), or set `LAYA_TRIM=0`.
 
+### Guard (off by default)
+
+Turn on "Guard risky commands" in Settings (or `LAYA_GUARD=1`). New sessions then run every shell
+command and file write past a gate before Claude Code's own permissions. Rules settle what they can.
+Clear damage is blocked: recursive deletes of the home folder or the root, force-pushing `main`,
+deleting `.git`, formatting a disk. Read-only commands pass, and so does deleting rebuildable output
+(`node_modules`, `dist`). Writing a secrets file asks first. Everything else gets one Laya question:
+"would this delete or overwrite data that cannot be restored?". At 0.75 or more you are asked first;
+in a headless run (`-p`), where nobody can answer, the command is blocked with the reason, so the
+agent can take another way. Measured on 34 commands, that flagged 15 of 16 destructive ones,
+including commands no deny list names (`find` with `-delete`, `aws s3 rm --recursive`,
+`kubectl delete namespace`). Laya can only make the gate stricter: a pass never skips Claude Code's
+own permission rules, and if Laya cannot be reached the rules decide alone. Blocks show up in History.
+
+### File ranking tool (off by default)
+
+Turn on "File ranking tool" (or `LAYA_RANK_FILES=1`). New sessions then get `laya_rank_files`:
+the agent asks a yes/no question about many files and gets them ranked, without the files entering
+its context. It is for questions about meaning ("does this file write to the database?"), not
+names, where grep is right and Laya is not. Measured on this repository against grep: ranking AUC
+0.96 for "opens a network socket", 0.88 for "reads run.json", 0.70 for an exact function name. It
+takes about 1.5 s a file, and the scores rank files rather than prove anything.
+
 ### Effort
 
 Effort (how hard the model thinks) follows [Anthropic's effort guide](https://platform.claude.com/docs/en/build-with-claude/effort),

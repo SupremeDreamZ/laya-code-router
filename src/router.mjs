@@ -325,3 +325,12 @@ export function warmSidecar() {
     // Spawn errors surface on the first ask; nothing to pre-warm.
   }
 }
+
+/**
+ * Caller-written typed questions on the warm routing model: `{id: {type, instructions, criteria?}}`
+ * in, Laya's answers out. Used by the guard, the file inspector and compaction, through the daemon.
+ */
+export async function askTyped(state, questions, { deadline } = {}) {
+  const result = await getSidecar().ask({ op: "typed", state, questions }, deadline ? { deadline } : undefined);
+  return result.answers ?? {};
+}

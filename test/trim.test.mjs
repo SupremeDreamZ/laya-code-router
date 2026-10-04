@@ -117,3 +117,12 @@ test("trimming is on by default, follows the app setting, and the env decides ou
   assert.equal(mergePrefs(defaultPrefs(), { trimToolResults: false }).trimToolResults, false);
   assert.equal(mergePrefs(defaultPrefs(), { trimToolResults: "no" }).trimToolResults, true, "invalid values are dropped");
 });
+
+test("the compaction request reuses the cut without moving it", async () => {
+  const { heldTrim } = await import("../src/trim.mjs");
+  const state = { prefixTokens: 500_000, trimmed: 32 };
+  assert.equal(heldTrim(state, convo(60)), 28, "same 32 cleared, nothing new");
+  assert.equal(state.trimmed, 32);
+  assert.equal(heldTrim({ trimmed: 0 }, convo(60)), null, "nothing cut, nothing to hold");
+  assert.equal(heldTrim({ trimmed: 32 }, convo(5)), null, "a conversation shorter than the cut is not this one");
+});
