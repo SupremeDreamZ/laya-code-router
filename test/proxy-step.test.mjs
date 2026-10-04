@@ -329,3 +329,31 @@ test("a sub-agent its parent pinned to a model is not re-routed, but is trimmed 
   assert.equal(e.effort, "high");
   assert.match(e.reason, /sub-agent/);
 });
+
+test("images count by what the API bills, not by their base64 text", async () => {
+  const { tokensOf, MEDIA_TOKENS } = await import("../src/proxy.mjs");
+  const png = { type: "image", source: { type: "base64", media_type: "image/png", data: "A".repeat(2_000_000) } };
+  const text = { type: "text", text: "x".repeat(4000) };
+  assert.ok(Math.abs(tokensOf([text]) - 1000) < 20, "text is about four characters a token");
+  // Measured: one screenshot in a tool result read as ~500k tokens by its characters.
+  assert.ok(tokensOf([{ type: "tool_result", content: [png] }]) < MEDIA_TOKENS.image + 50);
+  assert.ok(tokensOf([{ type: "document", source: { type: "base64", data: "B".repeat(900_000) } }]) <= MEDIA_TOKENS.document + 10);
+  assert.equal(tokensOf(null), 0);
+});
+
+test("a step is priced on the prompt size the API reported, not an estimate inflated by images", async (t) => {
+  const usage = { input_tokens: 2, cache_read_input_tokens: 40_000, output_tokens: 5 };
+  const { send, events } = await harness(t, { route: async () => at(0.6), prefs: mergePrefs(defaultPrefs(), { stepRouting: true }), usage });
+  const png = { type: "image", source: { type: "base64", media_type: "image/png", data: "A".repeat(3_000_000) } };
+  const withImages = (n) => {
+    const m = loopOf(n);
+    const last = m.at(-1);
+    last.content = last.content.map((b) => (b.type === "tool_result" ? { ...b, content: [png] } : b));
+    return m;
+  };
+  await send([user(OPENING)]);
+  for (let i = 1; i <= 8; i++) await send(withImages(i));
+  const steps = events.filter((e) => e.step);
+  assert.ok(steps.length > 0, "a step check ran");
+  for (const s of steps) assert.ok(s.step.contextTokens < 50_000, `priced at ${s.step.contextTokens}, the API said ~40k`);
+});

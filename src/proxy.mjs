@@ -107,7 +107,30 @@ export function newTurnPrompt(body) {
 
 const conversationalOf = (body) => (Array.isArray(body?.messages) ? body.messages : []).filter((m) => m?.role !== "system");
 const blocksOf = (content) => (typeof content === "string" ? [{ type: "text", text: content }] : Array.isArray(content) ? content : []);
-const charsOf = (value) => (typeof value === "string" ? value.length : JSON.stringify(value ?? "").length);
+/**
+ * Rough token count of message content. Text is ~4 characters a token, but an image or a PDF sent as
+ * base64 is not text: counted by its characters, one screenshot read as hundreds of thousands of
+ * tokens (measured: step estimates of 148k-865k for a session whose real prompt never passed 116k,
+ * all of it PNG frames the agent looked at). The API bills an image by its pixels, about 1,600 tokens
+ * for a typical one, so media blocks count as a flat figure instead of their encoding.
+ */
+export const MEDIA_TOKENS = { image: 1600, document: 3000 };
+export function tokensOf(value) {
+  if (value == null) return 0;
+  if (typeof value === "string") return value.length / 4;
+  if (Array.isArray(value)) return value.reduce((n, v) => n + tokensOf(v), 0);
+  if (typeof value === "object") {
+    if ((value.type === "image" || value.type === "document") && value.source && typeof value.source === "object") {
+      return MEDIA_TOKENS[value.type];
+    }
+    let n = 0;
+    for (const [k, v] of Object.entries(value)) n += k.length / 4 + tokensOf(v);
+    return n;
+  }
+  return String(value).length / 4;
+}
+/** Characters, for the per-step averages below: four per token, media at its token figure. */
+const charsOf = (value) => Math.round(tokensOf(value) * 4);
 
 /** Whether this request continues a tool loop: the last message hands back tool results. */
 export function isToolContinuation(body) {
@@ -581,7 +604,7 @@ export async function startProxy({
             } else if (prompt && !explaining) {
               const { catalogModels, models, allowed } = choicesFor(prefs);
               const currentModel = state.model ?? parent?.model ?? modelForTier(models, current);
-              const contextTokens = Math.round(JSON.stringify(body.messages).length / 4);
+              const contextTokens = Math.round(tokensOf(body.messages));
               laya = await ask(route, { prompt, current: currentModel, contextTokens, models: catalogModels });
               // No ongoing decision to protect: a session that is new, has been idle, or was
               // just compacted may move either way; otherwise the tier only goes up.
@@ -665,7 +688,12 @@ export async function startProxy({
                 // The cache a switch throws away is the whole prefix, system prompt and tools
                 // included, which the messages alone understate (measured: 6,758 estimated against
                 // 20,093 cached). The size the API reported for the last response is the real one.
-                const contextTokens = Math.max(Math.round(JSON.stringify(body.messages).length / 4), state.prefixTokens ?? 0);
+                // The size the API reported for the last response is the real one (the whole prefix,
+                // after any trimming); only the newest message has to be added to it. Without that
+                // figure, an estimate that counts images by their pixels, not their base64 text.
+                const contextTokens = state.prefixTokens
+                  ? state.prefixTokens + Math.round(tokensOf(body.messages?.at(-1)))
+                  : Math.round(tokensOf(body.messages));
                 laya = await ask(route, { prompt: stepText, current: currentModel, contextTokens, models: catalogModels }, stepDeadlineMs);
                 const size = stepSize(body);
                 const d = !stepRouting ? null : decideStep({
