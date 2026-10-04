@@ -30,6 +30,13 @@ export const DEFAULT_PREFS = Object.freeze({
    * cache. On by default: it costs a LAYA call every few steps and no model switch.
    */
   effortSteps: true,
+  /**
+   * Once a prompt passes ~120k tokens, have the API replace the oldest tool results (file contents,
+   * command output the model already used) with a placeholder, keeping the latest few whole. On by
+   * default: long tool loops re-read their whole history on every step, and this is the part of it
+   * the model no longer needs. Server-side, so Claude Code's own copy of the conversation is untouched.
+   */
+  trimToolResults: true,
   /** What a session runs on while the router is off. */
   pausedTier: "opus",
   /** What the savings figure compares against. */
@@ -74,6 +81,7 @@ const SCHEMA = {
   effortAuto: (v) => (isBool(v) ? v : undefined),
   stepRouting: (v) => (isBool(v) ? v : undefined),
   effortSteps: (v) => (isBool(v) ? v : undefined),
+  trimToolResults: (v) => (isBool(v) ? v : undefined),
   pausedTier: (v) => (oneOf(["haiku", "sonnet", "opus", "fable"])(v) ? v : undefined),
   baselineTier: (v) => (oneOf(["sonnet", "opus", "fable"])(v) ? v : undefined),
   showPrompts: (v) => (isBool(v) ? v : undefined),

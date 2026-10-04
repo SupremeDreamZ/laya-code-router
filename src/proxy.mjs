@@ -34,6 +34,7 @@ import { createUsageTap, decoderFor, readableEncodings } from "./usage.mjs";
 import { parseLimitHeaders, loadLimits, paceCapActive } from "./limits.mjs";
 import { PREFS_FILE, defaultPrefs, mergePrefs } from "./prefs.mjs";
 import { writeDecision, writeStatus } from "./status.mjs";
+import { TRIM_BETA, addTrim, clearedOf, planTrim } from "./trim.mjs";
 
 // Upstream the proxy forwards to. Defaults to first-party Anthropic, which is what a Claude
 // subscription login uses. Set LAYA_CLAUDE_UPSTREAM only to route through an Anthropic-dialect
@@ -348,6 +349,16 @@ const messageEffortOk = (body, model) =>
   takesMessageEffort(model) && body?.thinking?.type !== "between_tools" && !hasEffortMessages(body);
 
 let prefsCache = { mtimeMs: 0, value: null };
+/**
+ * Whether old tool results are trimmed. `LAYA_TRIM=1`/`0` decides outright (the live test and the
+ * command-line launcher without the app); otherwise the app's setting, on by default.
+ */
+export function trimOn(prefs, env = process.env) {
+  if (env.LAYA_TRIM === "1") return true;
+  if (env.LAYA_TRIM === "0") return false;
+  return prefs?.trimToolResults !== false;
+}
+
 function readPrefs() {
   if (process.env.LAYA_DISABLE_PREFS === "1") return null;
   try {
@@ -447,6 +458,7 @@ export async function startProxy({
       let out = Buffer.concat(chunks);
       let routedModel = null;
       let effortBeta = false;
+      let trimBeta = false;
       // What this request is, for the app's live feed: a tap on the response reads the token
       // usage the API itself reports, and the rest is the decision already made above.
       let report = null;
@@ -755,6 +767,9 @@ export async function startProxy({
                 body.output_config.effort = state.effort;
               }
             }
+            // Old tool results, trimmed server-side in stable jumps once the prompt is large (src/trim.mjs). Not on
+            // Claude Code's compaction request, whose job is to summarise that very history.
+            if (cls !== "compaction" && trimOn(prefs)) trimBeta = addTrim(body, planTrim(state, body));
             routedModel = model;
             if (onEvent) {
               report = {
@@ -768,6 +783,7 @@ export async function startProxy({
                 effort: effortNow ?? body.output_config?.effort ?? null,
                 effortReason,
                 ...(effortMsgs ? { effortTop, effortMsgs } : {}),
+                ...(trimBeta ? { trim: true } : {}),
                 reason: report?.reason ?? reason ?? null,
                 session: sessionOf(body),
                 prompt: humanTurn ? (prompt ?? undefined) : undefined,
@@ -801,6 +817,7 @@ export async function startProxy({
       delete headers[STEP_HEADER];
       delete headers[HEADLESS_HEADER];
       if (effortBeta) headers["anthropic-beta"] = mergeBeta(headers["anthropic-beta"], EFFORT_BETA);
+      if (trimBeta) headers["anthropic-beta"] = mergeBeta(headers["anthropic-beta"], TRIM_BETA);
       if (routedModel && headers["anthropic-beta"]) {
         headers["anthropic-beta"] = filterBetas(headers["anthropic-beta"], routedModel);
       }
@@ -898,7 +915,7 @@ export async function startProxy({
             // the usage could be read, without one when it could not. A decision that was made is
             // worth showing even when its price is unknown; dropping it made the feed look empty.
             let reported = false;
-            const finish = (usage, model) => {
+            const finish = (usage, model, contextManagement = null) => {
               if (reported) return;
               reported = true;
               if (up.statusCode === 400 && report.effortMsgs) {
@@ -907,9 +924,11 @@ export async function startProxy({
               }
               if (usage && convo) convo.prefixTokens = (usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
               // The status says whether the model this was routed to accepted the request at all.
-              emit({ ...report, model: report.model ?? model ?? undefined, status: up.statusCode, ...(usage ? { usage } : {}), kind: report.kind ?? "routed" });
+              const cleared = clearedOf(contextManagement);
+              if (cleared) debug(`trimmed ${cleared.tokens} tokens (${cleared.toolUses} old tool results)`);
+              emit({ ...report, model: report.model ?? model ?? undefined, status: up.statusCode, ...(usage ? { usage } : {}), ...(cleared ? { cleared } : {}), kind: report.kind ?? "routed" });
             };
-            const tap = createUsageTap(({ usage, model }) => finish(usage, model));
+            const tap = createUsageTap(({ usage, model, contextManagement }) => finish(usage, model, contextManagement));
             const settle = () => {
               tap.end();
               finish(null, null);

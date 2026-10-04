@@ -47,7 +47,10 @@ struct Snapshot: Decodable, Equatable {
         // Optional so a daemon from before alerts existed still decodes; the UI reads `alertPrefs`.
         var alerts: Alerts?
         var showUsageInMenuBar: Bool?
+        /// Optional so an older daemon still decodes; absent means on, the daemon's default.
+        var trimToolResults: Bool?
 
+        var trimOn: Bool { trimToolResults ?? true }
         var alertPrefs: Alerts { alerts ?? .standard }
         var menuBarUsage: Bool { showUsageInMenuBar ?? false }
 
@@ -78,6 +81,7 @@ struct Snapshot: Decodable, Equatable {
         var launch: LaunchPatch?
         var alerts: AlertsPatch?
         var showUsageInMenuBar: Bool?
+        var trimToolResults: Bool?
 
         struct AlertsPatch: Encodable {
             struct WindowsPatch: Encodable {
@@ -209,8 +213,15 @@ struct Snapshot: Decodable, Equatable {
         /// What this turn cost at list price, priced by the daemon. Absent when usage was not read.
         var cost: Double?
         var session: String?
+        /// Old tool results the API cleared from this request's prompt, when trimming applied.
+        var cleared: Cleared?
 
         var id: String { "\(at)-\(model ?? "")-\(tier ?? "")" }
+
+        struct Cleared: Decodable, Equatable {
+            var tokens: Double
+            var toolUses: Double
+        }
 
         struct TokenUse: Decodable, Equatable {
             var input: Double

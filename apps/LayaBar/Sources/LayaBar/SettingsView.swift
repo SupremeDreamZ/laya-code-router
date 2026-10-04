@@ -58,6 +58,12 @@ struct SettingsView: View {
                     , set: { client.update(.init(effortAuto: $0)) }, isOn: prefs.effortAuto)
 
                     ToggleRow(
+                        icon: "scissors",
+                        title: "Trim old tool results",
+                        subtitle: "In long tool loops past about 120k tokens, old file contents and command output are cleared from the prompt in large steps, keeping the latest 8 whole. The model can re-read anything it needs."
+                    , set: { client.update(.init(trimToolResults: $0)) }, isOn: prefs.trimOn)
+
+                    ToggleRow(
                         icon: "text.quote",
                         title: "Show prompt text",
                         subtitle: "Keeps what you typed in the History list. It never leaves this Mac either way."

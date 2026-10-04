@@ -69,6 +69,21 @@ LAYA scores that task and the sub-agent keeps the result for its whole tool loop
 changes the main conversation's model. If LAYA cannot answer, the sub-agent runs on whatever the main
 conversation is running on. Claude Code's background calls (titles, summaries) still go to Haiku.
 
+### Trimming old tool results
+
+Long tool loops re-read their whole history on every step. On this router's own log every session
+was one prompt followed by 50-260 tool steps, with the prompt growing to as much as 446k tokens.
+Once a prompt passes about 120k tokens, the router asks the API to replace the oldest tool
+results (file contents and command output the model has already used) with a placeholder. The
+latest 8 stay whole. This is the API's server-side context editing, so Claude Code's own copy of
+the conversation is never changed. On Opus 5.5 and Fable 5.1 it never invalidates thinking blocks.
+
+The cut stays where it is between moves, so the same prefix is cleared on every request and the
+prompt cache keeps building on it. It moves forward only after the prompt has grown 40% past what
+the last move left. Clearing a little more on every step broke the cache on every step when
+measured. `node test/live-trim.mjs` shows the difference on a real run. Turn it off in Settings
+("Trim old tool results"), or set `LAYA_TRIM=0`.
+
 ### Effort
 
 Effort (how hard the model thinks) follows [Anthropic's effort guide](https://platform.claude.com/docs/en/build-with-claude/effort),

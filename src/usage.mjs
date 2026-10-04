@@ -91,6 +91,8 @@ export function createUsageTap(onUsage) {
   let model = null;
   let json = "";
   let jsonMode = null;
+  // What server-side context editing removed, as the API reports it (`applied_edits`).
+  let contextManagement = null;
   const take = (u) => {
     if (!u || typeof u !== "object") return;
     usage ??= { input: 0, cacheWrite: 0, cacheRead: 0, cacheWrite1h: 0, output: 0 };
@@ -107,7 +109,10 @@ export function createUsageTap(onUsage) {
       if (evt.type === "message_start") {
         model = evt.message?.model ?? model;
         take(evt.message?.usage);
-      } else if (evt.type === "message_delta") take(evt.usage);
+      } else if (evt.type === "message_delta") {
+        take(evt.usage);
+        if (evt.context_management) contextManagement = evt.context_management;
+      }
     } catch {
       // A partial or non-JSON data line; the next chunk completes it or it is noise.
     }
@@ -134,12 +139,13 @@ export function createUsageTap(onUsage) {
           const body = JSON.parse(json);
           model = body.model ?? model;
           take(body.usage);
+          if (body.context_management) contextManagement = body.context_management;
         } catch {
           // Not a usage-bearing JSON body.
         }
       } else if (buf.trim()) line(buf.trim());
       buf = json = "";
-      if (usage) onUsage({ usage, model });
+      if (usage) onUsage({ usage, model, contextManagement });
     },
   };
 }

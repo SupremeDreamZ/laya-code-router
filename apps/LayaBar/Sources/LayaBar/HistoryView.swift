@@ -75,6 +75,12 @@ struct EventRow: View {
                                 .font(Theme.Face.micro)
                                 .foregroundStyle(Theme.faint)
                         }
+                        if let c = e.cleared {
+                            Text("trimmed \(Self.tokens(c.tokens))")
+                                .font(Theme.Face.micro)
+                                .foregroundStyle(Theme.faint)
+                                .help("\(Int(c.toolUses)) old tool results cleared from this request's prompt")
+                        }
                         Spacer(minLength: 0)
                         Text(clock(e.at))
                             .font(Theme.Face.micro)
@@ -95,6 +101,10 @@ struct EventRow: View {
             .background(Theme.surface, in: RoundedRectangle(cornerRadius: 8))
         }
         .buttonStyle(PressableStyle())
+    }
+
+    static func tokens(_ n: Double) -> String {
+        n >= 1000 ? "\(Int((n / 1000).rounded()))k" : "\(Int(n))"
     }
 
     private func clock(_ at: Double) -> String {
